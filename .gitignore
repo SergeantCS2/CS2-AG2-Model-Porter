@@ -1,0 +1,17 @@
+# per-user state
+settings.json
+logs/
+__pycache__/
+*.pyc
+
+# never commit game assets - they are not yours to redistribute
+*.vmdl
+*.vmdl_c
+*.vmat
+*.vmat_c
+*.vtex
+*.vtex_c
+*.vpk
+*.dmx
+*.png
+*.tga
