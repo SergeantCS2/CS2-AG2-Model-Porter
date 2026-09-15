@@ -1,5 +1,5 @@
 
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 #requires -Version 5.1
 <#
     CS2-AG2-Model-Porter — interactive launcher

@@ -314,6 +314,10 @@ Nothing binds, so you get the bind pose. Hence the T-pose.
 
 ## What the scripts do
 
+I worked this out by pulling apart Valve's own agents (`ctm_fbi`, `ctm_sas`),
+comparing them to broken community models, and fixing differences until none
+were left. Every rule is measured against something that provably animates.
+
 Per model:
 
 - **Delete `anim_graph_name`** — the `.vanmgrph` reference Valve removed

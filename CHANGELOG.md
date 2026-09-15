@@ -1,5 +1,99 @@
 # Changelog
 
+## v1.2.0
+
+**ADDED:** weapon attachments are matched to Valve's own agents. Community
+models inherited an AnimGraph1 layout - `weapon_hand_l`/`weapon_hand_r` parented
+to a legacy helper bone with no offset, and no `weapon_center` at all - which is
+why the weapon sat at the entity origin, on the floor between the feet. They are
+now parented to `hand_L`/`hand_R` with the exact offsets and rotations read from
+`ctm_fbi.vmdl`, and a `weapon_center` is added when missing.
+
+This is pre-existing in every pack tested, not something the port introduced.
+The weapon bones themselves were always correct: Valve's agents carry only
+`wpnPivot` and `wpn`, matching what this tool grafts to five decimal places.
+
+
+## v1.1.3
+
+**FIXED:** models authored on an axis other than +Z came out lying down. The
+conversion preserves world position exactly, so a model built with its spine
+along -X was faithfully preserved lying on its back. The up axis is now detected
+from the pelvis and corrected before conversion. Verified against three packs:
+23 of 24 models are +Z-up and unaffected; the one outlier now matches
+
+
+## v1.1.2
+
+**FIXED:** `Verify-Model.ps1` failed models it should only have flagged. The
+pelvis orientation test now fails only when the bone is genuinely still outside
+`root_motion`, and warns when a model is simply authored in a different
+orientation
+
+**FIXED:** `spine_0`, `spine_1`, `spine_2`, `spine_3` and `neck_0` moved from
+critical to optional - one model runs pelvis straight to spine_1, compiles and
+animates fine. Parent checks are skipped when the expected parent is absent, so
+a shorter spine chain is no longer reported as wrong parenting
+
+
+## v1.1.1
+
+Fixes from a failing run against a hand-assembled zip of loose models.
+
+**FIXED:** in `-Source` mode the output folder was rebuilt as `<root>/<model
+name>`, which is wrong whenever the folder is not named after the model - one
+pack has `zombie.vmdl_c` inside a folder called `zombiertx`. The model, its DMX
+meshes and its materials all landed where the compiler never looked. The
+directory now comes from the model's own recorded path
+
+**FIXED:** materials were flattened into a folder called `materials` regardless
+of where the model expects them. The source folder layout is now mirrored, so
+packs using `mat` or nested folders resolve
+
+**FIXED:** compiled textures were copied in, then swept away before the compiler
+ran, leaving rebuilt materials pointing at images that were not there. Textures
+are decompiled to `.png` first
+
+**ADDED:** materials a model references but the source does not contain are
+pulled from CS2's own files, or stubbed with a placeholder and a warning, rather
+than failing the whole model
+
+**FIXED:** `$matDirs` was built with `$x = if (...) { @($y) }`, which PowerShell
+unwraps to a string - `+=` then concatenated paths instead of appending them.
+This broke material discovery for every model in the VPK path
+
+**FIXED:** `-ListOnly` refused to run unless the addon already existed
+
+
+## v1.1.0
+
+Fixes from a report against a mixed pack of loose model files.
+
+**FIXED:** `-Source` mode ported viewmodel arms, map stubs and props as if they
+were player models. Detection is now by skeleton content - pelvis plus a leg -
+so it works whatever the files are named
+
+**FIXED:** materials were only found in a folder called `materials`. Some packs
+use `mat`, some nest deeper. Every `.vmat_c`/`.vtex_c` under the model's folder
+is now collected, wherever it sits
+
+**ADDED:** models with no `root_motion` bone get one created, with every
+existing root adopted under it and its transform converted so nothing moves.
+Previously these failed outright with "need both pelvis and root_motion"
+
+**ADDED:** stray root bones beside `root_motion` are adopted into it. Canonical
+skeletons have exactly one root, and a bone left outside is never animated
+
+**FIXED:** half-ported models with an existing `AnimGraph2List` were skipped
+wholesale. Missing entries are now topped up individually - one model had a
+skeleton list containing only the viewmodel, leaving the worldmodel graph
+nothing to animate against
+
+**FIXED:** the pelvis orientation check failed models authored in a different
+orientation. It now only fails when pelvis is genuinely unparented, and warns
+otherwise
+
+
 ## v1.0.0
 
 First release.

@@ -1,6 +1,6 @@
 param([Parameter(Mandatory=$true)][string]$MaterialsDir)
 
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 Write-Host "Fix-Materials $SCRIPT_VERSION" -ForegroundColor DarkGray
 
 # Clean up the .vmat files Source2Viewer-CLI produces so resourcecompiler

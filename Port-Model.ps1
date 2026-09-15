@@ -27,7 +27,7 @@ param(
 # "include" "characters" in gameinfo.gi, and an addon created named $Addon.
 
 $ErrorActionPreference = "Stop"
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 
 # Native stderr handling differs between Windows PowerShell 5.1 and PowerShell 7:
 # 5.1 promotes a native program's stderr into terminating errors when combined
@@ -137,7 +137,11 @@ foreach ($p in $need) {
     if (-not (Test-Path $p.p)) { Write-Error "$($p.n) not found: $($p.p)"; exit 1 }
 }
 if ($Source -and -not (Test-Path $Source)) { Write-Error "source folder not found: $Source"; exit 1 }
-if (-not (Test-Path $OUT)) { Write-Error "addon '$Addon' not created yet - Workshop Tools -> Create New Addon"; exit 1 }
+# Listing does not write anything, so it should not demand an addon exists.
+if (-not $ListOnly -and -not (Test-Path $OUT)) {
+    Write-Error "addon '$Addon' not created yet - run Setup-AG2.ps1 -Addon $Addon"
+    exit 1
+}
 $gi = (Select-String -Path "$CS\game\csgo\gameinfo.gi" -Pattern '"include"\s+"characters"' -EA SilentlyContinue).Count
 if ($gi -eq 0) { Write-Warning "gameinfo.gi has no 'characters' include - your published VPK will be empty. Run Setup-AG2.ps1." }
 
@@ -174,15 +178,37 @@ if ($CompileOnly) {
 $LooseFiles = @{}
 if ($Source) {
     $ModelRoot = $null
+    $skipped = @()
     foreach ($f in (Get-ChildItem $Source -Recurse -Filter *.vmdl_c -ErrorAction SilentlyContinue)) {
         $d = Invoke-Native $S2V @("-i", $f.FullName, "--block", "DATA")
         $mn = [regex]::Match($d, 'm_name\s*=\s*"([^"]+)"')
         if (-not $mn.Success) { continue }
         $intern = $mn.Groups[1].Value -replace '\.vmdl$', ''      # e.g. characters/models/pack/foo/foo
         $name = Split-Path $intern -Leaf
-        # skip viewmodel arms and anything without a skeleton
-        if ($d -notmatch 'm_modelSkeleton') { continue }
-        $LooseFiles[$name] = @{ File = $f.FullName; Root = (Split-Path (Split-Path $intern -Parent) -Parent) -replace '\\','/' }
+
+        # A player model has a full body skeleton. Viewmodel arms, props and map
+        # stubs do not, whatever they are called - so test the bones rather than
+        # guessing from the filename. Arms carry 20-40 bones and no pelvis.
+        $bm = [regex]::Match($d, 'm_modelSkeleton\s*=\s*\{\s*m_boneName\s*=\s*\[(.*?)\]', 'Singleline')
+        if (-not $bm.Success) { $skipped += "$name (no skeleton)"; continue }
+        $bones = @([regex]::Matches($bm.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value.ToLower() })
+        # pelvis + a leg is the minimal signature of a body. Deliberately not
+        # requiring spine_0 - some models run pelvis straight to spine_1 - nor
+        # root_motion, which plenty of models are missing and we can add.
+        $hasBody = ($bones -contains 'pelvis') -and
+                   (($bones -contains 'leg_upper_l') -or ($bones -contains 'leg_upper_r'))
+        if (-not $hasBody) { $skipped += "$name ($($bones.Count) bones, no body skeleton)"; continue }
+
+        # Use the model's OWN directory from m_name. Reconstructing it as
+        # <root>/<name> assumes the folder is named after the model, and plenty
+        # are not - one pack has zombie.vmdl_c inside a folder called zombiertx.
+        # Getting this wrong puts the .vmdl, its .dmx meshes and its materials
+        # somewhere the compiler never looks.
+        $LooseFiles[$name] = @{ File = $f.FullName; Dir = (Split-Path $intern -Parent) -replace '\\','/' }
+    }
+    if ($skipped.Count) {
+        Write-Host "skipped $($skipped.Count) non-player-model file(s):" -ForegroundColor DarkGray
+        $skipped | ForEach-Object { Write-Host "   $_" -ForegroundColor DarkGray }
     }
     $models = $LooseFiles.Keys | Sort-Object
     if (-not $models) { Write-Error "no player models found in $Source"; exit 1 }
@@ -255,7 +281,7 @@ foreach ($m in $todo) {
     $label = $m -replace '_player_model$', ''
     $prefix = if ($total -gt 1) { "[$modelIndex/$total] " } else { "" }
     Write-Host "`n=== $prefix$label ===" -ForegroundColor Cyan
-    $ModelDir     = if ($Source) { "$($LooseFiles[$m].Root)/$m" } else { $ModelDirs[$m] }
+    $ModelDir     = if ($Source) { $LooseFiles[$m].Dir } else { $ModelDirs[$m] }
     $ModelRoot    = (Split-Path $ModelDir -Parent) -replace '\\','/'
     $ModelDirWin  = $ModelDir.Replace("/", "\")
     $dir  = "$OUT\$ModelDirWin"
@@ -280,10 +306,28 @@ foreach ($m in $todo) {
         if ($Source) {
             $null = Invoke-Native $S2V @("-i", $LooseFiles[$m].File, "-o", $vmdl, "-d")
             # carry any sibling materials across so the rebuild can find them
-            $srcMat = Join-Path (Split-Path $LooseFiles[$m].File -Parent) "materials"
-            if (Test-Path $srcMat) {
-                New-Item -ItemType Directory -Force -Path $MAT | Out-Null
-                Copy-Item "$srcMat\*" $MAT -Recurse -Force -ErrorAction SilentlyContinue
+            # Materials do not reliably live in a folder called "materials" -
+            # some packs use "mat", some sit beside the model, some nest deeper.
+            # Take every .vmat_c/.vtex_c under the model's folder, wherever it is.
+            # Mirror the source folder structure rather than flattening into a
+            # folder called "materials". Packs use "mat", "materials", or nest
+            # deeper, and the model references whichever it was built with.
+            $srcRoot = Split-Path $LooseFiles[$m].File -Parent
+            $srcMats = @(Get-ChildItem $srcRoot -Recurse -File -EA SilentlyContinue |
+                         Where-Object { $_.Extension -in '.vmat_c', '.vtex_c' })
+            $matDirsFound = @()
+            foreach ($sm in $srcMats) {
+                $rel = $sm.FullName.Substring($srcRoot.Length).TrimStart('\','/')
+                $tgt = Join-Path $dir $rel
+                New-Item -ItemType Directory -Force -Path (Split-Path $tgt -Parent) | Out-Null
+                Copy-Item $sm.FullName $tgt -Force -EA SilentlyContinue
+                $matDirsFound += (Split-Path $tgt -Parent)
+            }
+            $matDirsFound = @($matDirsFound | Sort-Object -Unique)
+            if ($srcMats.Count) {
+                Write-Host "  collected $($srcMats.Count) material file(s) into $($matDirsFound.Count) folder(s)"
+            } else {
+                Write-Warning "  no .vmat_c/.vtex_c found under $srcRoot - model will be untextured"
             }
         } else {
             $null = Invoke-Native $S2V @("-i", $VPK, "-o", $OUT, "-f", $filt, "-d")
@@ -294,7 +338,10 @@ foreach ($m in $todo) {
         # the model under agents/models/<name>/ and its materials under
         # characters/models/<name>/materials/. Read the compiled model's resource
         # list and pull in anything that falls outside what we just extracted.
-        $matDirs = @($MAT)
+        # @(...) around the whole expression is load-bearing: PowerShell unwraps
+        # a single-element array returned from an if, leaving a string, and then
+        # += concatenates instead of appending.
+        $matDirs = @(if ($Source -and $matDirsFound.Count) { $matDirsFound } else { $MAT })
         if (-not $Source) {
             $null = Invoke-Native $S2V @("-i", $VPK, "-o", $OUT, "-f", "$ModelDir/$m.vmdl_c", "-e", "vmdl_c")
             $rawC = "$dir\$m.vmdl_c"
@@ -326,6 +373,51 @@ foreach ($m in $todo) {
             }
             Write-Host "  rebuilt $nRebuilt material(s)"
             if ($nRebuilt -eq 0) { throw "could not rebuild any materials" }
+        }
+
+        # Textures arrive as compiled .vtex_c. The rebuilt .vmat files point at
+        # image sources, so turn them into .png BEFORE the sweep below deletes
+        # every _c file - otherwise the materials reference images that are not
+        # there and the model renders black.
+        if ($Source) {
+            $nTex = 0
+            foreach ($tc in ($matDirs | ForEach-Object { Get-ChildItem "$_\*.vtex_c" -EA SilentlyContinue })) {
+                $png = [IO.Path]::ChangeExtension($tc.FullName, $null).TrimEnd('.')
+                $png = ($png -replace '\.vtex$', '') + '.png'
+                if (-not (Test-Path $png)) {
+                    $null = Invoke-Native $S2V @("-i", $tc.FullName, "-o", $png, "-d")
+                    if (Test-Path $png) { $nTex++ }
+                }
+            }
+            if ($nTex) { Write-Host "  decompiled $nTex texture(s) to png" }
+        }
+
+        # A model can reference materials its source folder does not contain -
+        # shared assets the pack normally supplies, missing from a hand-made zip.
+        # Try CS2's own files first, then fall back to a minimal placeholder so
+        # one absent texture does not fail the whole model.
+        $srcModel = if ($Source) { $LooseFiles[$m].File } else { "$dir\$m.vmdl_c" }
+        if (Test-Path $srcModel) {
+            $rerl = Invoke-Native $S2V @("-i", $srcModel, "--block", "RERL")
+            $needed = @([regex]::Matches($rerl, '[a-z0-9_/]+\.vmat') |
+                        ForEach-Object { $_.Value } | Sort-Object -Unique)
+            $pak = "$CS\game\csgo\pak01_dir.vpk"
+            $made = 0; $pulled = 0
+            foreach ($need in $needed) {
+                $tgt = Join-Path $OUT ($need -replace '/','\')
+                if (Test-Path $tgt) { continue }
+                New-Item -ItemType Directory -Force -Path (Split-Path $tgt -Parent) | Out-Null
+                if (Test-Path $pak) {
+                    $null = Invoke-Native $S2V @("-i", $pak, "-o", $OUT, "-f", "$($need)_c", "-d")
+                    if (Test-Path $tgt) { $pulled++; continue }
+                }
+                # minimal stand-in: compiles, renders with the shader default
+                @("// placeholder - original not present in the source",
+                  "Layer0", "{", "`tshader `"csgo_character.vfx`"", "}") | Set-Content $tgt
+                $made++
+            }
+            if ($pulled) { Write-Host "  pulled $pulled missing material(s) from CS2" }
+            if ($made)   { Write-Warning "  $made material(s) not in the source - placeholders used, those meshes will be untextured" }
         }
 
         # content/ holds SOURCES only. Any compiled artefact that lands here

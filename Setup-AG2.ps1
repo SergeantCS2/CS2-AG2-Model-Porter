@@ -11,7 +11,7 @@ param(
     [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
 )
 
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 Write-Host "Setup-AG2 $SCRIPT_VERSION" -ForegroundColor DarkGray
 
 # One-time setup. Idempotent - safe to re-run.

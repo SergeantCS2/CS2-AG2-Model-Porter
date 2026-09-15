@@ -7,7 +7,7 @@ param(
     [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
 )
 
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 Write-Host "Cleanup-AG2 $SCRIPT_VERSION" -ForegroundColor DarkGray
 
 # Removes everything this project added to the local CS2 install.

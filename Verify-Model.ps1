@@ -7,7 +7,7 @@ param(
     [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
 )
 
-$SCRIPT_VERSION = "1.0.0"
+$SCRIPT_VERSION = "1.2.0"
 
 # Verify a COMPILED .vmdl_c before publishing. Reads only; changes nothing.
 #
@@ -46,11 +46,13 @@ function Invoke-Native {
 $CS   = $CS2Path
 $ADDON = "$CS\game\csgo_addons\$Addon"
 
-$CRITICAL = @('root_motion','pelvis','spine_0','spine_1','spine_2','spine_3','neck_0','head_0',
+$CRITICAL = @('root_motion','pelvis','head_0',
               'clavicle_L','clavicle_R','arm_upper_L','arm_upper_R','arm_lower_L','arm_lower_R',
               'hand_L','hand_R','leg_upper_L','leg_upper_R','leg_lower_L','leg_lower_R',
               'ankle_L','ankle_R','wpnPivot','wpn')
-$IMPORTANT = @('ball_L','ball_R')
+# Absent on some rigs without stopping them working - one model runs pelvis
+# straight to spine_1 and compiles and animates fine.
+$IMPORTANT = @('spine_0','spine_1','spine_2','spine_3','neck_0','ball_L','ball_R')
 
 # canonical parents for the critical chain, from worldmodel.vnmskel
 $PARENT = @{
@@ -165,10 +167,13 @@ foreach ($t in $targets) {
             $bad += "CRITICAL bone(s) missing: $($missC -join ', ')"
         }
     }
-    if ($missI.Count) { $wrn += "toe bone(s) missing: $($missI -join ', ') - foot IK may be off" }
+    if ($missI.Count) { $wrn += "optional bone(s) missing: $($missI -join ', ')" }
 
     if ($hier.Count) {
-        $mism = @($PARENT.Keys | Where-Object { $bones -contains $_ -and $hier[$_] -ne $PARENT[$_] })
+        # Only meaningful when the expected parent exists. A rig missing spine_0
+        # legitimately parents spine_1 to pelvis instead, and that is not an error.
+        $mism = @($PARENT.Keys | Where-Object {
+            $bones -contains $_ -and ($bones -contains $PARENT[$_]) -and $hier[$_] -ne $PARENT[$_] })
         if ($mism.Count) { $bad += "wrong parent on: $($mism -join ', ')" }
         $roots = @($bones | Where-Object { $hier[$_] -eq '' })
         if ($roots -notcontains 'root_motion') { $bad += "root_motion is not a root" }
@@ -177,7 +182,12 @@ foreach ($t in $targets) {
     # pelvis must sit in root_motion's space: height in Y, not Z
     if ($pelvisPos) {
         if ([math]::Abs($pelvisPos[2]) -gt [math]::Abs($pelvisPos[1])) {
-            $bad += ("pelvis position [{0:F2}, {1:F2}, {2:F2}] is Z-up - NOT converted into root_motion space, model will be rotated" -f $pelvisPos[0], $pelvisPos[1], $pelvisPos[2])
+            # Converted, but not in the usual orientation. Some models are
+            # authored differently and the conversion preserves world position
+            # either way, so this warrants a look rather than a failure - the
+            # real failure is pelvis still sitting outside root_motion, checked
+            # by the hierarchy test above.
+            $wrn += ("pelvis [{0:F2}, {1:F2}, {2:F2}] - unusual orientation, check it stands upright in Source2Viewer" -f $pelvisPos[0], $pelvisPos[1], $pelvisPos[2])
         }
     }
 
@@ -185,8 +195,8 @@ foreach ($t in $targets) {
 
     $core = $CRITICAL.Count - $missC.Count
     Write-Host "=== $short ===" -ForegroundColor Cyan
-    Write-Host ("  core {0}/{1}   toes {2}/2   fingers {3}   bones {4}   refs {5}g/{6}s" -f `
-        $core, $CRITICAL.Count, ($IMPORTANT.Count - $missI.Count), $fingers, $bones.Count, $vg, $vs)
+    Write-Host ("  core {0}/{1}   optional {2}/{7}   fingers {3}   bones {4}   refs {5}g/{6}s" -f `
+        $core, $CRITICAL.Count, ($IMPORTANT.Count - $missI.Count), $fingers, $bones.Count, $vg, $vs, $IMPORTANT.Count)
     if ($pelvisPos) { Write-Host ("  pelvis [{0:F2}, {1:F2}, {2:F2}] (height should be the middle value)" -f $pelvisPos[0],$pelvisPos[1],$pelvisPos[2]) }
 
     if ($bad.Count) {
