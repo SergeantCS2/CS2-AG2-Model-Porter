@@ -45,7 +45,7 @@ packs are the whole point, or those lost to time.
 These models are running live on my server — it's what I built this against for testing.
 
 ```
-connect 20.106.131.225
+connect sergeantcs2.dev:27015
 ```
 
 **Subscribe to my collection first or AG2 models** — it has everything the server mounts, maps
