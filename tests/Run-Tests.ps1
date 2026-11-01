@@ -346,6 +346,8 @@ Remove-Item (Join-Path $addonGame 'characters') -Recurse -Force
 $c = Invoke-Script 'Port-Model.ps1' @('-CompileOnly', '-CS2Path', $cs2, '-S2V', $S2VExe)
 Check ($c.Exit -eq 0) "exit 0" $c.Out
 Check (Test-Path (Join-Path $addonGame "$T/zombiertx/zombie.vmdl_c")) "compiles the ported model outside the tidy layout" $c.Out
+Check (-not (Test-Path (Join-Path $addonGame "$T/alpha_arms/alpha_arms.vmdl_c")) -and ($c.Out -match 'not ported yet.*alpha_arms')) `
+      "leaves an unported source (arms) alone instead of compiling it" $c.Out
 
 Section "Port-Model.ps1 -Source (loose files)"
 # folder named zombiertx, model compiled for characters/models/loose/undead/
@@ -395,6 +397,64 @@ $updatedPatched = $updated -replace '("maps"\n)', "`$1`t`t`t`t`"include`"`t`"cha
 [IO.File]::WriteAllBytes("$gi.bak", $orig)
 $cl2 = Invoke-Script 'Cleanup-AG2.ps1' @('-CS2Path', $cs2b, '-Addon', 'setuptest', '-Remove')
 Check ((Read-Text $gi) -ceq $updated) "stale backup: current file kept, only our line removed" $cl2.Out
+
+# ---------------------------------------------------------------- linux port
+$Py = if ($OnWin) { 'python' } else { 'python3' }
+$LinuxPy = Join-Path $Repo 'linux/ag2port.py'
+$Compare = Join-Path $PSScriptRoot 'linux_compare.py'
+
+Section "linux/ag2port.py - the same model edits as AG2-All.ps1"
+foreach ($k in $fx.Keys) {
+    $lp = Write-Fixture (Join-Path $Tmp "lin/$k") $k $fx[$k]
+    if ($k -eq 'no_pelvis') {
+        $null = & $Py $Compare $LinuxPy $lp --expect-not-player-model 2>&1
+        Check ($LASTEXITCODE -eq 3) "$k - recognised as not a player model"
+    } else {
+        $diff = & $Py $Compare $LinuxPy $lp $res[$k].Path 2>&1 | Out-String
+        Check ($LASTEXITCODE -eq 0) "$k - identical to Windows" $diff
+    }
+}
+$lother = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes((Join-Path $Tmp 'lin/lowercase/characters/models/test/lowercase/other_body.dmx')))
+Check ($lother.Contains([char]0 + 'hand_l' + [char]0)) "lowercase - another model's DMX left alone"
+
+if (-not $OnWin) {
+    Section "linux/ag2port.py - prepare on Linux, compile with -CompileOnly on Windows"
+    $oldHome = $env:HOME
+    $env:HOME = Join-Path $Tmp 'linhome'
+    New-Launcher (Join-Path $env:HOME 's2v/Source2Viewer-CLI') $FakeS2V
+    try {
+        $env3 = New-FakeCS2 (Join-Path $Tmp 'lin') $giPatched
+        $cs2l = $env3.CS2
+        $lc = Join-Path $cs2l 'content/csgo_addons/lintest'
+        New-Item -ItemType Directory -Force -Path $lc, (Join-Path $cs2l 'game/csgo_addons/lintest') | Out-Null
+        $lp = & $Py $LinuxPy --cs2 $cs2l --addon lintest port --vpk (Join-Path $packDir '1234567890_dir.vpk') --all --no-compile 2>&1 | Out-String
+        Check ($LASTEXITCODE -eq 0 -and $lp -match 'prepared : 4\s+failed : 0') "prepares the pack's four player models" $lp
+        Check ($lp -match 'skipped: 1 file\(s\) with no pelvis bone') "skips the arms"
+        $la = Read-Text (Join-Path $lc "$T/alpha/alpha.vmdl")
+        Check ($la -match '_class = "AnimGraph2List"' -and $la -match 'parent_bone = "hand_R"') "ported, weapon attachments on the hands"
+        Check (Test-Path (Join-Path $lc "$T/beta/mat/cloth.vmat")) "material in mat/ rebuilt"
+        Check (Test-Path (Join-Path $lc "$T/gamma/textures/g.png")) "texture in its own folder renamed"
+        $lco = Invoke-Script 'Port-Model.ps1' @('-CompileOnly', '-Addon', 'lintest', '-CS2Path', $cs2l)
+        Check ($lco.Exit -eq 0 -and $lco.Out -match 'compiled : 4\s+failed : 0') "Windows -CompileOnly compiles what Linux prepared" $lco.Out
+        $lv = Invoke-Script 'Verify-Model.ps1' @('-All', '-Addon', 'lintest', '-CS2Path', $cs2l, '-S2V', $S2VExe)
+        Check ($lv.Exit -eq 0) "and it verifies" $lv.Out
+
+        $ls2 = & $Py $LinuxPy --cs2 $cs2l --addon lintest port --source $src --all --no-compile 2>&1 | Out-String
+        Check ($LASTEXITCODE -eq 0 -and (Test-Path (Join-Path $lc "$L/zombie.vmdl"))) "loose files: placed at the path the model records" $ls2
+        Check ((Read-Text (Join-Path $lc "$L/materials/skin.vmat")) -match 'skin_color\.png' -and
+               (Test-Path (Join-Path $lc "$L/materials/skin_color.png"))) "loose files: material rebuilt, texture decompiled first"
+
+        $env4 = New-FakeCS2 (Join-Path $Tmp 'linsetup') $GameinfoLF
+        $gil = Join-Path $env4.CS2 'game/csgo/gameinfo.gi'
+        $origL = [IO.File]::ReadAllBytes($gil)
+        $null = & $Py $LinuxPy --cs2 $env4.CS2 --addon lintest setup 2>&1
+        $pl = [IO.File]::ReadAllText($gil)
+        Check ($pl -match '"include"\s+"characters"' -and -not $pl.Contains("`r") -and
+               (Get-B64 "$gil.bak") -eq [Convert]::ToBase64String($origL)) "setup patches gameinfo.gi in place and backs up the current file"
+        $null = & $Py $LinuxPy --cs2 $env4.CS2 --addon lintest clean --remove 2>&1
+        Check ((Get-B64 $gil) -eq [Convert]::ToBase64String($origL)) "clean restores it byte for byte"
+    } finally { $env:HOME = $oldHome }
+}
 
 } finally {
     Write-Host ""

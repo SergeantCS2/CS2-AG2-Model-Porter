@@ -23,11 +23,13 @@ HOME = Path.home()
 CFG_FILE = HOME / ".config" / "ag2port" / "settings.json"
 
 # ── canonical AG2 skeleton ───────────────────────────────────────────────────
-CRITICAL = ['root_motion','pelvis','spine_0','spine_1','spine_2','spine_3','neck_0','head_0',
+# Same tiers as Verify-Model.ps1. spine/neck are optional: one model runs
+# pelvis straight to spine_1 and animates fine.
+CRITICAL = ['root_motion','pelvis','head_0',
             'clavicle_L','clavicle_R','arm_upper_L','arm_upper_R','arm_lower_L','arm_lower_R',
             'hand_L','hand_R','leg_upper_L','leg_upper_R','leg_lower_L','leg_lower_R',
             'ankle_L','ankle_R','wpnPivot','wpn']
-IMPORTANT = ['ball_L','ball_R']
+IMPORTANT = ['spine_0','spine_1','spine_2','spine_3','neck_0','ball_L','ball_R']
 PARENT = {
     'root_motion':'',        'pelvis':'root_motion',   'spine_0':'pelvis',
     'spine_1':'spine_0',     'spine_2':'spine_1',      'spine_3':'spine_2',
@@ -39,7 +41,19 @@ PARENT = {
     'wpnPivot':'root_motion','wpn':'wpnPivot',
 }
 # canonical bones carrying a side suffix — only these are ever case-flipped
-CANON_SIDED = [b for b in PARENT if b.endswith(('_L','_R'))]
+# canonical bones carrying a side suffix - only these are ever case-flipped.
+# Same list as AG2-All.ps1.
+CANON = ['ankle_L','ankle_R','arm_lower_L','arm_lower_R','arm_upper_L','arm_upper_R','attachFoot_L','attachFoot_R',
+         'attachHand_L','attachHand_R','ball_L','ball_R','clavicle_L','clavicle_R','finger_index_0_L','finger_index_0_R',
+         'finger_index_1_L','finger_index_1_R','finger_index_2_L','finger_index_2_R','finger_index_meta_L',
+         'finger_index_meta_R','finger_middle_0_L','finger_middle_0_R','finger_middle_1_L','finger_middle_1_R',
+         'finger_middle_2_L','finger_middle_2_R','finger_middle_meta_L','finger_middle_meta_R','finger_pinky_0_L',
+         'finger_pinky_0_R','finger_pinky_1_L','finger_pinky_1_R','finger_pinky_2_L','finger_pinky_2_R',
+         'finger_pinky_meta_L','finger_pinky_meta_R','finger_ring_0_L','finger_ring_0_R','finger_ring_1_L',
+         'finger_ring_1_R','finger_ring_2_L','finger_ring_2_R','finger_ring_meta_L','finger_ring_meta_R',
+         'finger_thumb_0_L','finger_thumb_0_R','finger_thumb_1_L','finger_thumb_1_R','finger_thumb_2_L',
+         'finger_thumb_2_R','hand_L','hand_R','leg_lower_L','leg_lower_R','leg_upper_L','leg_upper_R',
+         'wpnHand_L','wpnHand_R']
 
 PHYS_BODIES = ['hand_l','ankle_r','ankle_l','hand_r','arm_upper_r','arm_lower_r',
                'arm_lower_l','leg_lower_r','arm_upper_l','head_0','leg_upper_L',
@@ -127,7 +141,7 @@ def model_skeleton(text):
     hier = {bones[i]: (bones[par[i]] if par[i] >= 0 else '')
             for i in range(min(len(bones), len(par)))}
     pos = None
-    pp = re.search(r'm_bonePosParent\s*=\s*\[(.*?)\n\t\t\]', text, re.S)
+    pp = re.search(r'm_bonePosParent\s*=\s*\[(.*?)\r?\n[ \t]*\]', text, re.S)
     if pp and 'pelvis' in bones:
         v = re.findall(r'\[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]', pp.group(1))
         i = bones.index('pelvis')
@@ -136,8 +150,31 @@ def model_skeleton(text):
 
 
 # ── ModelDoc source editing ──────────────────────────────────────────────────
+# A step-for-step port of AG2-All.ps1. The two must produce the same .vmdl -
+# tests/linux_compare.py checks that on every synthetic model in the test
+# suite - so when one changes, change the other.
+
+class NotPlayerModel(Exception):
+    """No pelvis bone: viewmodel arms or a prop. Skipped, not failed."""
+
+
+ORIGIN_RE = r'origin = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]'
+ANGLES_RE = r'angles = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]'
+
+# rotation that brings a model authored on another axis onto +Z
+AXES = {
+    "-X": [[0, 0, 1], [0, 1, 0], [-1, 0, 0]],
+    "+X": [[0, 0, -1], [0, 1, 0], [1, 0, 0]],
+    "+Y": [[1, 0, 0], [0, 0, -1], [0, 1, 0]],
+    "-Y": [[1, 0, 0], [0, 0, 1], [0, -1, 0]],
+    "-Z": [[1, 0, 0], [0, -1, 0], [0, 0, -1]],
+    "+Z": [[1, 0, 0], [0, 1, 0], [0, 0, 1]],
+}
+
+
 def angle_matrix(p, y, r):
-    p, y, r = map(math.radians, (p, y, r))
+    d = math.pi / 180.0
+    p, y, r = p * d, y * d, r * d
     sp, cp = math.sin(p), math.cos(p)
     sy, cy = math.sin(y), math.cos(y)
     sr, cr = math.sin(r), math.cos(r)
@@ -146,23 +183,29 @@ def angle_matrix(p, y, r):
             [-sp,   sr*cp,          cr*cp]]
 
 
-def to_root_motion_space(origin, angles):
-    """root_motion sits at [0,90,90] in every model seen, and its matrix is the
-    permutation [[0,0,1],[1,0,0],[0,1,0]]. Re-express a former root in that
-    space: origin cycles, angles get the transpose applied (a row cycle).
-    Skip this and the model compiles perfectly and comes out on its side."""
+def to_root_motion_space(origin, angles, rm_angles, up="+Z"):
+    """Re-express a former root bone in root_motion's space: new = R^T * (A * M),
+    where R is root_motion's own rotation (any angles - packs are not all at a
+    clean [0, 90, 90]) and A turns a model authored on another axis onto +Z.
+    Skip this and the model compiles perfectly and comes out on its side.
+    Same operations in the same order as AG2-All.ps1."""
+    d = math.pi / 180.0
     m = angle_matrix(*angles)
-    n = [m[1], m[2], m[0]]
-    d = 180.0/math.pi
-    yaw   = math.atan2(n[1][0], n[0][0]) * d
-    pitch = math.atan2(-n[2][0], math.hypot(n[0][0], n[1][0])) * d
-    roll  = math.atan2(n[2][1], n[2][2]) * d
-    return [origin[1], origin[2], origin[0]], [pitch, yaw, roll]
+    r = angle_matrix(*rm_angles)
+    a = AXES.get(up, AXES["+Z"])
+    m = [[a[i][0]*m[0][j] + a[i][1]*m[1][j] + a[i][2]*m[2][j] for j in range(3)] for i in range(3)]
+    o = [a[i][0]*origin[0] + a[i][1]*origin[1] + a[i][2]*origin[2] for i in range(3)]
+    n = [[r[0][i]*m[0][j] + r[1][i]*m[1][j] + r[2][i]*m[2][j] for j in range(3)] for i in range(3)]
+    no = [r[0][i]*o[0] + r[1][i]*o[1] + r[2][i]*o[2] for i in range(3)]
+    yaw = math.atan2(n[1][0], n[0][0]) / d
+    pitch = math.atan2(-n[2][0], math.sqrt(n[0][0]*n[0][0] + n[1][0]*n[1][0])) / d
+    roll = math.atan2(n[2][1], n[2][2]) / d
+    return no, [pitch, yaw, roll]
 
 
 def find_block(lines, idx):
-    """Given the index of a '_class = ...' line, return (start, end) of the
-    enclosing { ... } object, inclusive."""
+    """Given the index of a line inside a { ... } object, return (start, end)
+    of that object, inclusive: walk back to the '{', then brace-match."""
     s = idx
     while s >= 0 and lines[s].strip() != '{': s -= 1
     depth, e = 0, s
@@ -173,46 +216,88 @@ def find_block(lines, idx):
     raise RuntimeError("unbalanced braces")
 
 
-AG2_NODES = '''{i}{{
-{i}\t_class = "NmSkeletonList"
-{i}\tchildren = 
-{i}\t[
-{i}\t\t{{
-{i}\t\t\t_class = "NmSkeletonReference"
-{i}\t\t\tfilename = "animation/skeletons/characters/worldmodel.vnmskel"
-{i}\t\t}},
-{i}\t\t{{
-{i}\t\t\t_class = "NmSkeletonReference"
-{i}\t\t\tfilename = "animation/skeletons/characters/viewmodel.vnmskel"
-{i}\t\t}},
-{i}\t]
-{i}}},
-{i}{{
-{i}\t_class = "AnimGraph2List"
-{i}\tchildren = 
-{i}\t[
-{i}\t\t{{
-{i}\t\t\t_class = "DefaultAnimGraph2"
-{i}\t\t\tfilename = "animation/graphs/worldmodel/worldmodel.vnmgraph"
-{i}\t\t}},
-{i}\t\t{{
-{i}\t\t\t_class = "AnimGraph2"
-{i}\t\t\tname = "uimodel"
-{i}\t\t\tfilename = "animation/graphs/ui/uimodel.vnmgraph"
-{i}\t\t}},
-{i}\t\t{{
-{i}\t\t\t_class = "AnimGraph2"
-{i}\t\t\tname = "hudmodel"
-{i}\t\t\tfilename = "animation/graphs/viewmodel/viewmodel.vnmgraph"
-{i}\t\t}},
-{i}\t\t{{
-{i}\t\t\t_class = "AnimGraph2"
-{i}\t\t\tname = "worldmodel"
-{i}\t\t\tfilename = "animation/graphs/worldmodel/worldmodel.vnmgraph"
-{i}\t\t}},
-{i}\t]
-{i}}},
-'''
+def _prefix(line, key):
+    """The text before the first occurrence of key (its indentation)."""
+    i = line.find(key)
+    return line[:i] if i >= 0 else line
+
+
+def _vec(line, regex):
+    m = re.search(regex, line)
+    return [float(x) for x in m.groups()] if m else None
+
+
+def _replace_transform(lines, oi, ai, c):
+    no, na = c
+    lines[oi] = re.sub(r'origin = \[[^\]]*\]', 'origin = [ %.6f, %.6f, %.6f ]' % tuple(no), lines[oi])
+    lines[ai] = re.sub(r'angles = \[[^\]]*\]', 'angles = [ %.6f, %.6f, %.6f ]' % tuple(na), lines[ai])
+
+
+def _convert_block(blk, rm_angles, up):
+    """Convert a lifted root bone's own origin/angles (within its first lines)."""
+    for i in range(min(8, len(blk))):
+        if not _vec(blk[i], ORIGIN_RE): continue
+        ai = next((j for j in range(min(8, len(blk))) if _vec(blk[j], ANGLES_RE)), -1)
+        if ai < 0: break
+        _replace_transform(blk, i, ai, to_root_motion_space(_vec(blk[i], ORIGIN_RE), _vec(blk[ai], ANGLES_RE), rm_angles, up))
+        break
+    return blk
+
+
+def find_bone_children(lines, name_idx):
+    """The 'children =' of the bone named on line name_idx, or -1 for a leaf.
+    Searched only inside the bone's own block - an open-ended scan runs past a
+    leaf bone and finds some later node's children array instead."""
+    ind = _prefix(lines[name_idx], 'name')
+    _, e = find_block(lines, name_idx)
+    for i in range(name_idx + 1, e):
+        if lines[i].strip() == 'children =' and _prefix(lines[i], 'children') == ind:
+            return i
+    return -1
+
+
+def add_first_child(lines, name_idx, block):
+    ind = _prefix(lines[name_idx], 'name')
+    k = find_bone_children(lines, name_idx)
+    if k >= 0:
+        lines[k+2:k+2] = block
+        return "first child"
+    _, e = find_block(lines, name_idx)
+    lines[e:e] = [ind + 'children = ', ind + '['] + block + [ind + ']']
+    return "new children array"
+
+
+def bone_angles(lines, name_idx):
+    _, e = find_block(lines, name_idx)
+    for i in range(name_idx, min(name_idx + 6, e)):
+        v = _vec(lines[i], ANGLES_RE)
+        if v: return v
+    return [0.0, 0.0, 0.0]
+
+
+def _balanced(lines):
+    t = '\n'.join(lines)
+    return t.count('{') == t.count('}') and t.count('[') == t.count(']')
+
+
+def ag2_list_block(ind, which):
+    if which == 'skeleton':
+        blk = [f'{ind}{{', f'{ind}\t_class = "NmSkeletonList"', f'{ind}\tchildren = ', f'{ind}\t[']
+        for s in ('worldmodel', 'viewmodel'):
+            blk += [f'{ind}\t\t{{', f'{ind}\t\t\t_class = "NmSkeletonReference"',
+                    f'{ind}\t\t\tfilename = "animation/skeletons/characters/{s}.vnmskel"', f'{ind}\t\t}},']
+        return blk + [f'{ind}\t]', f'{ind}}},']
+    graphs = [('DefaultAnimGraph2', None, 'animation/graphs/worldmodel/worldmodel.vnmgraph'),
+              ('AnimGraph2', 'uimodel', 'animation/graphs/ui/uimodel.vnmgraph'),
+              ('AnimGraph2', 'hudmodel', 'animation/graphs/viewmodel/viewmodel.vnmgraph'),
+              ('AnimGraph2', 'worldmodel', 'animation/graphs/worldmodel/worldmodel.vnmgraph')]
+    blk = [f'{ind}{{', f'{ind}\t_class = "AnimGraph2List"', f'{ind}\tchildren = ', f'{ind}\t[']
+    for cls, name, fn in graphs:
+        blk += [f'{ind}\t\t{{', f'{ind}\t\t\t_class = "{cls}"']
+        if name: blk.append(f'{ind}\t\t\tname = "{name}"')
+        blk += [f'{ind}\t\t\tfilename = "{fn}"', f'{ind}\t\t}},']
+    return blk + [f'{ind}\t]', f'{ind}}},']
+
 
 WPN_BONES = '''{i}{{
 {i}\t_class = "Bone"
@@ -234,199 +319,314 @@ WPN_BONES = '''{i}{{
 '''
 
 
-def port_vmdl(path: Path, strip_ag1=True, add_phys=True):
+def port_vmdl(path: Path, strip_ag1=True):
     """Apply every AG2 edit to a decompiled ModelDoc source, in place."""
-    L = path.read_text(encoding='utf-8', errors='replace').split('\n')
+    L = path.read_text(encoding='utf-8-sig').split('\n')
     log = []
+    find = lambda pat, start=0, flags=re.I: next((i for i in range(start, len(L)) if re.search(pat, L[i], flags)), -1)
 
-    # ---- 1. re-parent pelvis under root_motion, converting its transform ----
-    # Physics shapes and attachments carry their own name fields, often reusing
-    # bone names. Only ever match an actual Bone node.
-    def find_bone(name, lines=None):
-        lines = lines if lines is not None else L
-        for i in range(1, len(lines)):
-            if '_class = "Bone"' in lines[i-1] and re.match(rf'^\s*name = "{name}"\s*$', lines[i]):
-                return i
-        return None
-    pel = find_bone('pelvis')
-    rm  = find_bone('root_motion')
-    if pel is not None and rm is not None:
-        ind_p = len(L[pel]) - len(L[pel].lstrip('\t'))
-        ind_r = len(L[rm])  - len(L[rm].lstrip('\t'))
-        if ind_p == ind_r:                       # both are roots -> needs the move
-            rm_ang = None
-            for i in range(rm, min(rm+6, len(L))):
-                m = re.search(r'angles = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]', L[i])
-                if m: rm_ang = [float(x) for x in m.groups()]; break
-            if rm_ang and abs(rm_ang[0]) < .01 and abs(rm_ang[1]-90) < .01 and abs(rm_ang[2]-90) < .01:
-                ps, pe = find_block(L, pel)
-                oi = ai = -1; po = pa = None
-                for i in range(pel, min(pel+8, pe)):
-                    mo = re.search(r'origin = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]', L[i])
-                    if mo and oi < 0: oi, po = i, [float(x) for x in mo.groups()]
-                    ma = re.search(r'angles = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]', L[i])
-                    if ma and ai < 0: ai, pa = i, [float(x) for x in ma.groups()]
-                if oi >= 0 and ai >= 0:
-                    no, na = to_root_motion_space(po, pa)
-                    L[oi] = re.sub(r'origin = \[[^\]]*\]',
-                                   'origin = [ %.6f, %.6f, %.6f ]' % tuple(no), L[oi])
-                    L[ai] = re.sub(r'angles = \[[^\]]*\]',
-                                   'angles = [ %.6f, %.6f, %.6f ]' % tuple(na), L[ai])
-                    log.append("pelvis transform -> origin [%.4f, %.4f, %.4f]" % tuple(no))
-                ps, pe = find_block(L, pel)
-                block = ['\t' + x for x in L[ps:pe+1]]
-                del L[ps:pe+1]
-                rm = find_bone('root_motion')
-                ind = L[rm][:len(L[rm]) - len(L[rm].lstrip('\t'))]
-                k = -1
-                for i in range(rm+1, len(L)):
-                    if L[i].strip() == 'children =' and L[i][:len(L[i])-len(L[i].lstrip('\t'))] == ind:
-                        k = i; break
-                if k >= 0:
-                    L[k+2:k+2] = block
-                    log.append("pelvis re-parented under root_motion")
+    # ---- part 1: the skeleton ------------------------------------------------
+    sk = find(r'_class = "Skeleton"')
+    if sk < 0: raise RuntimeError("no Skeleton node")
+    pel, rm = find(r'name = "pelvis"', sk), find(r'name = "root_motion"', sk)
+    if pel < 0: raise NotPlayerModel("no pelvis bone - is this a player model?")
+
+    # up axis, read from pelvis only when it is not already inside root_motion
+    # (there its origin is root_motion-relative and would read as +Y)
+    up = "+Z"
+    pel_under_rm = False
+    if rm >= 0:
+        s, e = find_block(L, rm)
+        pel_under_rm = s < pel < e
+    if not pel_under_rm:
+        for i in range(pel, min(pel + 8, len(L))):
+            pv = _vec(L[i], ORIGIN_RE)
+            if not pv: continue
+            bi = 0
+            for k in (1, 2):
+                if abs(pv[k]) > abs(pv[bi]): bi = k
+            up = ('+' if pv[bi] >= 0 else '-') + "XYZ"[bi]
+            if up != "+Z": log.append(f"model is authored {up}-up rather than +Z - correcting orientation")
+            break
+
+    # no root_motion: create one and adopt every existing root under it
+    if rm < 0:
+        sk_ind = _prefix(L[sk], '_class')
+        sk_kids = next((i for i in range(sk + 1, len(L))
+                        if L[i].strip() == 'children =' and _prefix(L[i], 'children') == sk_ind), -1)
+        if sk_kids < 0: raise RuntimeError("Skeleton node has no children array")
+        bi = sk_ind + '\t'
+        roots, depth = [], 0
+        for i in range(sk_kids + 1, len(L)):
+            depth += len(re.findall(r'\[|\{', L[i])) - len(re.findall(r'\]|\}', L[i]))
+            if depth <= 0: break
+            if re.search(r'_class = "Bone"', L[i], re.I) and _prefix(L[i], '_class') == bi + '\t':
+                roots.append(i)
+        if not roots: raise RuntimeError("Skeleton has no top-level bones")
+        adopted = []
+        for r in sorted(roots, reverse=True):
+            s, e = find_block(L, r)
+            adopted = _convert_block(['\t' + x for x in L[s:e+1]], [0, 90, 90], up) + adopted
+            del L[s:e+1]
+        sk_kids = next(i for i in range(sk + 1, len(L))
+                       if L[i].strip() == 'children =' and _prefix(L[i], 'children') == sk_ind)
+        L[sk_kids+2:sk_kids+2] = ([f'{bi}{{', f'{bi}\t_class = "Bone"', f'{bi}\tname = "root_motion"',
+                                   f'{bi}\torigin = [ 0.0, 0.0, 0.0 ]', f'{bi}\tangles = [ 0.0, 90.0, 90.0 ]',
+                                   f'{bi}\tdo_not_discard = true', f'{bi}\tchildren = ', f'{bi}\t[']
+                                  + adopted + [f'{bi}\t]', f'{bi}}},'])
+        log.append(f"created root_motion and adopted {len(roots)} existing root(s)")
+        pel, rm = find(r'name = "pelvis"', sk), find(r'name = "root_motion"', sk)
+
+    # pelvis and root_motion as siblings: convert pelvis, move it under root_motion
+    if len(_prefix(L[pel], 'name')) == len(_prefix(L[rm], 'name')):
+        ps, pe = find_block(L, pel)
+        rm_ang = next((v for v in (_vec(L[i], ANGLES_RE) for i in range(rm, min(rm + 6, len(L)))) if v), [0.0, 0.0, 0.0])
+        oi = next((i for i in range(pel, min(pel + 8, pe)) if _vec(L[i], ORIGIN_RE)), -1)
+        ai = next((i for i in range(pel, min(pel + 8, pe)) if _vec(L[i], ANGLES_RE)), -1)
+        if oi >= 0 and ai >= 0:
+            c = to_root_motion_space(_vec(L[oi], ORIGIN_RE), _vec(L[ai], ANGLES_RE), rm_ang, up)
+            _replace_transform(L, oi, ai, c)
+            log.append("pelvis transform -> origin [%.4f, %.4f, %.4f]" % tuple(c[0]))
+        else:
+            log.append("!! could not read pelvis origin/angles - transform NOT applied")
+        block = ['\t' + x for x in L[ps:pe+1]]
+        del L[ps:pe+1]
+        rm = find(r'name = "root_motion"', sk)
+        if rm < 0: raise RuntimeError("lost root_motion after removal")
+        how = add_first_child(L, rm, block)
+        log.append("pelvis re-parented under root_motion" + (" (new children array)" if how != "first child" else ""))
+        if not _balanced(L): raise RuntimeError("brace mismatch after re-parent - not written")
+
+    # stray roots beside root_motion: adopt them, converting each transform
+    sk2 = find(r'_class = "Skeleton"')
+    sk_ind2 = _prefix(L[sk2], '_class')
+    kids2 = next((i for i in range(sk2 + 1, min(sk2 + 6, len(L)))
+                  if L[i].strip() == 'children =' and _prefix(L[i], 'children') == sk_ind2), -1)
+    if kids2 >= 0:
+        bi2 = sk_ind2 + '\t\t'
+        strays, depth, rm_name2 = [], 0, -1
+        for i in range(kids2 + 1, len(L)):
+            depth += len(re.findall(r'\[|\{', L[i])) - len(re.findall(r'\]|\}', L[i]))
+            if depth <= 0: break
+            if re.search(r'_class = "Bone"', L[i], re.I) and _prefix(L[i], '_class') == bi2:
+                nm = nm_idx = None
+                for j in range(i + 1, min(i + 4, len(L))):
+                    mm = re.match(r'^\s*name = "([^"]+)"', L[j])
+                    if mm: nm, nm_idx = mm.group(1), j; break
+                if nm and nm.lower() == 'root_motion': rm_name2 = nm_idx
+                elif nm: strays.append((i, nm))
+        if rm_name2 >= 0 and strays:
+            before = list(L)
+            rm_ang2 = bone_angles(L, rm_name2)
+            moved = []
+            for idx, _ in sorted(strays, reverse=True):
+                s, e = find_block(L, idx)
+                moved = _convert_block(['\t' + x for x in L[s:e+1]], rm_ang2, up) + moved
+                del L[s:e+1]
+            rmn = next((i for i in range(1, len(L)) if re.match(r'^\s*name = "root_motion"\s*$', L[i], re.I)
+                        and any(re.search(r'_class = "Bone"', L[j], re.I) for j in range(i - 1, max(0, i - 3) - 1, -1))), -1)
+            if rmn >= 0:
+                add_first_child(L, rmn, moved)
+            if rmn >= 0 and _balanced(L):
+                log.append("adopted %d stray root(s) under root_motion: %s" % (len(strays), ', '.join(n for _, n in strays)))
             else:
-                log.append("!! root_motion angles unexpected - transform skipped")
+                L = before
+                log.append("!! stray roots NOT adopted")
 
-    text = '\n'.join(L)
-
-    # ---- 2. case flip, only for canonical bones, with the DMX ---------------
-    pairs = []
-    for i, l in enumerate(L):
-        if i < 1 or '_class = "Bone"' not in L[i-1]: continue
-        m = re.match(r'^\s*name = "([A-Za-z0-9_]+)"', l)
-        if not m: continue
-        n = m.group(1)
-        c = re.sub(r'_twist1$', '_TWIST1', n)
-        c = re.sub(r'_twist$', '_TWIST', c)
-        c = re.sub(r'_l$', '_L', c); c = re.sub(r'_r$', '_R', c)
-        if c != n and c in CANON_SIDED:
-            L[i] = l.replace(f'"{n}"', f'"{c}"')
-            pairs.append((n, c))
-    if pairs:
-        log.append(f"case-flipped {len(pairs)} bone name(s)")
-        # attachments / hitboxes / physics reference bones by name too
-        fields = r'parent_bone|bone|bone_name|anklebone|toebone|start_bone|end_bone'
-        fixed = 0
-        for i, l in enumerate(L):
-            m = re.match(rf'^\s*({fields}) = "([A-Za-z0-9_]+)"', l)
+    # ---- part 2: names, references and AG2 nodes -----------------------------
+    # case-flip side suffixes if this model predates the uppercase convention
+    if any(re.search(r'name = "\w+_(l|r)"', l, re.I) for l in L):
+        pairs = []
+        for i in range(1, len(L)):
+            if not re.search(r'_class = "Bone"', L[i-1], re.I): continue
+            m = re.search(r'name = "([A-Za-z0-9_]+)"', L[i])
             if not m: continue
-            for o, c in pairs:
-                if m.group(2) == o:
-                    L[i] = l.replace(f'"{o}"', f'"{c}"'); fixed += 1; break
-        if fixed: log.append(f"repointed {fixed} bone reference(s)")
-        # the mesh binds by name through the DMX jointList. Length-preserving,
-        # so patch the string table in place or the mesh detaches.
-        n_dmx = 0
-        for dmx in path.parent.glob('*.dmx'):
-            b = dmx.read_bytes(); orig = b
-            for o, c in pairs:
-                b = b.replace(b'\x00' + o.encode() + b'\x00', b'\x00' + c.encode() + b'\x00')
-            if b != orig: dmx.write_bytes(b); n_dmx += 1
-        log.append(f"patched {n_dmx} DMX file(s)" if n_dmx else "!! no DMX patched")
+            n = m.group(1)
+            c = n
+            for pat, rep in ((r'_twist1$', '_TWIST1'), (r'_twist$', '_TWIST'), (r'_l$', '_L'), (r'_r$', '_R'),
+                             (r'_l(?=_TWIST)', '_L'), (r'_r(?=_TWIST)', '_R')):
+                c = re.sub(pat, rep, c, flags=re.I)
+            if c != n and c in CANON:
+                L[i] = re.sub('name = "' + re.escape(n) + '"', 'name = "' + c + '"', L[i], flags=re.I)
+                pairs.append((n, c))
+        if pairs:
+            log.append(f"case-flipped {len(pairs)} bone name(s) to _L/_R")
+            # the mesh binds by name through the DMX jointList; patch only the
+            # DMX files this model references (length-preserving, in place)
+            dmx_files = []
+            for ref in sorted(set(re.findall(r'filename = "([^"]+\.dmx)"', '\n'.join(L), re.I))):
+                up_dir = path.parent
+                for _ in range(12):
+                    cand = up_dir / ref
+                    if cand.exists(): dmx_files.append(cand); break
+                    if up_dir.parent == up_dir: break
+                    up_dir = up_dir.parent
+            if not dmx_files: dmx_files = sorted(path.parent.glob('*.dmx'))
+            n_dmx = 0
+            for dmx in dmx_files:
+                b = dmx.read_bytes(); orig = b
+                for o, c in pairs:
+                    b = b.replace(b'\x00' + o.encode() + b'\x00', b'\x00' + c.encode() + b'\x00')
+                if b != orig: dmx.write_bytes(b); n_dmx += 1
+            log.append(f"patched {n_dmx} DMX file(s) to match" if n_dmx else "!! no DMX patched - mesh binding may be broken")
+            fields = r'parent_bone|bone|bone_name|anklebone|toebone|start_bone|end_bone|attachment_bone'
+            for i, l in enumerate(L):
+                m = re.match(rf'^\s*({fields}) = "([A-Za-z0-9_]+)"', l)
+                if not m: continue
+                for o, c in pairs:
+                    if m.group(2) == o:
+                        L[i] = l.replace(f'"{o}"', f'"{c}"'); break
 
-    # ---- 3. Feet references that no longer resolve -------------------------
-    skel = [re.match(r'^\s*name = "([A-Za-z0-9_]+)"', L[i]).group(1)
-            for i in range(1, len(L))
-            if '_class = "Bone"' in L[i-1] and re.match(r'^\s*name = "([A-Za-z0-9_]+)"', L[i])]
-    ff = 0
+    # Feet references that only differ in case from a real bone
+    skel = [re.search(r'name = "([A-Za-z0-9_]+)"', L[i]).group(1) for i in range(1, len(L))
+            if re.search(r'_class = "Bone"', L[i-1], re.I) and re.search(r'name = "([A-Za-z0-9_]+)"', L[i], re.I)]
     for i, l in enumerate(L):
-        m = re.match(r'^\s*(anklebone|toebone) = "([A-Za-z0-9_]+)"', l)
-        if not m: continue
-        b = m.group(2)
-        if b in skel: continue
-        alt = next((s for s in skel if s.lower() == b.lower()), None)
-        if alt: L[i] = l.replace(f'"{b}"', f'"{alt}"'); ff += 1
-    if ff: log.append(f"corrected {ff} Feet reference(s)")
+        m = re.search(r'(anklebone|toebone) = "([A-Za-z0-9_]+)"', l)
+        if not m or m.group(2) in skel: continue
+        alt = next((s for s in skel if s.lower() == m.group(2).lower()), None)
+        if alt and alt != m.group(2):
+            L[i] = l.replace(f'"{m.group(2)}"', f'"{alt}"')
 
-    # ---- 4. drop the AnimGraph1 binding ------------------------------------
-    before = len(L)
-    L = [l for l in L if not ('anim_graph_name' in l and 'vanmgrph' in l)]
-    if len(L) != before: log.append("removed anim_graph_name")
+    # drop the AnimGraph1 binding and the animset include
+    L = [l for l in L if not (re.search('anim_graph_name', l, re.I) and re.search('vanmgrph', l, re.I))]
+    for i in range(len(L) - 1, -1, -1):
+        if i >= len(L) or not re.search(r'_class = "AnimIncludeModel"', L[i], re.I): continue
+        if re.search('animsets/', '\n'.join(L[i:min(i + 3, len(L) - 1) + 1]), re.I):
+            s, e = find_block(L, i)
+            del L[s:e+1]
 
-    while True:
-        hit = next((i for i,l in enumerate(L) if '_class = "AnimIncludeModel"' in l
-                    and any('animsets/' in L[j] for j in range(i, min(i+4, len(L))))), None)
-        if hit is None: break
-        s, e = find_block(L, hit); del L[s:e+1]
-        log.append("removed AnimIncludeModel")
-
-    # ---- 5. add the AG2 node lists -----------------------------------------
-    if 'AnimGraph2List' not in '\n'.join(L):
-        sk = next((i for i,l in enumerate(L) if '_class = "Skeleton"' in l), None)
-        if sk is None: raise RuntimeError("no Skeleton node")
-        s, _ = find_block(L, sk)
-        ind = L[s][:len(L[s]) - len(L[s].lstrip('\t'))]
-        L[s:s] = AG2_NODES.format(i=ind).rstrip('\n').split('\n')
+    # the AG2 node lists - each checked on its own
+    sk = find(r'_class = "Skeleton"')
+    if sk < 0: raise RuntimeError("no Skeleton node")
+    opn = sk - 1
+    while opn >= 0 and L[opn].strip() != '{': opn -= 1
+    ind = _prefix(L[opn], '{')
+    joined = '\n'.join(L)
+    has_skel = bool(re.search(r'_class = "NmSkeletonList"', joined, re.I))
+    has_graph = bool(re.search(r'_class = "AnimGraph2List"', joined, re.I))
+    if not has_skel and not has_graph:
+        L[opn:opn] = ag2_list_block(ind, 'skeleton') + ag2_list_block(ind, 'graph')
         log.append("inserted NmSkeletonList + AnimGraph2List")
+    else:
+        new = []
+        if not has_skel: new += ag2_list_block(ind, 'skeleton')
+        if not has_graph: new += ag2_list_block(ind, 'graph')
+        if new: L[opn:opn] = new
+        want = [('NmSkeletonList', 'NmSkeletonReference', None, 'animation/skeletons/characters/worldmodel.vnmskel'),
+                ('NmSkeletonList', 'NmSkeletonReference', None, 'animation/skeletons/characters/viewmodel.vnmskel'),
+                ('AnimGraph2List', 'DefaultAnimGraph2', None, 'animation/graphs/worldmodel/worldmodel.vnmgraph'),
+                ('AnimGraph2List', 'AnimGraph2', 'uimodel', 'animation/graphs/ui/uimodel.vnmgraph'),
+                ('AnimGraph2List', 'AnimGraph2', 'hudmodel', 'animation/graphs/viewmodel/viewmodel.vnmgraph')]
+        added = 0
+        for lst, cls, name, fn in want:
+            if re.search(re.escape(fn), '\n'.join(L), re.I): continue
+            li = find(f'_class = "{lst}"')
+            if li < 0: continue
+            l_ind = _prefix(L[li], '_class')
+            lk = next((i for i in range(li + 1, min(li + 6, len(L)))
+                       if L[i].strip() == 'children =' and _prefix(L[i], 'children') == l_ind), -1)
+            if lk < 0: continue
+            ei = l_ind + '\t'
+            entry = [f'{ei}{{', f'{ei}\t_class = "{cls}"'] + ([f'{ei}\tname = "{name}"'] if name else [])
+            L[lk+2:lk+2] = entry + [f'{ei}\tfilename = "{fn}"', f'{ei}}},']
+            added += 1
+        if new or added: log.append("AnimGraph2 lists topped up")
 
-    # ---- 6. graft wpnPivot -> wpn ------------------------------------------
-    if 'wpnPivot' not in '\n'.join(L):
-        rm = next((i for i in range(1, len(L))
-                   if '_class = "Bone"' in L[i-1]
-                   and re.match(r'^\s*name = "root_motion"\s*$', L[i])), None)
-        if rm is not None:
-            ind = L[rm][:len(L[rm]) - len(L[rm].lstrip('\t'))]
-            k = next((i for i in range(rm+1, len(L))
-                      if L[i].strip() == 'children =' and
-                         L[i][:len(L[i])-len(L[i].lstrip('\t'))] == ind), None)
-            if k is not None:
-                bi = L[k+1][:len(L[k+1]) - len(L[k+1].lstrip('\t'))] + '\t'
-                L[k+2:k+2] = WPN_BONES.format(i=bi).rstrip('\n').split('\n')
-                log.append("grafted wpnPivot/wpn")
+    # graft wpnPivot -> wpn under root_motion (CS2's canonical rest values)
+    rm = find(r'name = "root_motion"')
+    if re.search(r'name = "wpnPivot"', '\n'.join(L), re.I):
+        pass
+    elif rm < 0:
+        log.append("!! no root_motion bone - wpnPivot NOT added")
+    else:
+        rm_ind = _prefix(L[rm], 'name')
+        kids = -1
+        for i in range(rm + 1, len(L)):
+            t = L[i].strip()
+            if t == 'children =' and _prefix(L[i], 'children') == rm_ind: kids = i; break
+            if re.match(r'^_class = ', t, re.I) and len(_prefix(L[i], '_class')) <= len(rm_ind): break
+        if kids < 0:
+            log.append("!! root_motion has no children array - wpnPivot NOT added")
+        else:
+            L[kids+2:kids+2] = WPN_BONES.format(i=_prefix(L[kids + 1], '[') + '\t').rstrip('\n').split('\n')
+            log.append("grafted wpnPivot/wpn")
 
-    # ---- 7. name any empty BodyGroupChoice ---------------------------------
-    fixed = 0
-    for i in range(len(L)-1, -1, -1):
-        if '_class = "BodyGroupChoice"' not in L[i]: continue
-        s, e = find_block(L, i)
-        seg = '\n'.join(L[i:e+1])
-        if re.search(r'^\s*name = ', seg, re.M): continue
-        mesh = re.search(r'"([^"]+)"\s*,', seg)
-        ind = L[i][:len(L[i]) - len(L[i].lstrip('\t'))]
-        L.insert(i+1, f'{ind}name = "{mesh.group(1) if mesh else "choice"}"')
-        fixed += 1
-    if fixed: log.append(f"named {fixed} BodyGroupChoice entries")
+    # name any BodyGroupChoice the decompiler left unnamed
+    fixed, i = 0, 0
+    while i < len(L):
+        if re.search(r'_class = "BodyGroupChoice"', L[i], re.I):
+            d, e = 0, i
+            while e < len(L):
+                d += L[e].count('{') - L[e].count('}')
+                if d < 0: break
+                e += 1
+            seg = '\n'.join(L[i:min(e, len(L) - 1) + 1])
+            if not re.search('name = ', seg, re.I):
+                mesh = re.search(r'"([^"]+)"\s*,', seg)
+                L.insert(i + 1, _prefix(L[i], '_class') + 'name = "' + (mesh.group(1) if mesh else f"choice{fixed}") + '"')
+                fixed += 1
+        i += 1
 
-    # ---- 8. strip AnimGraph1-era nodes -------------------------------------
+    # strip AnimGraph1-era nodes, then match Valve's weapon attachments
     if strip_ag1:
-        removed = 0
-        for cls in ('MovementSettings', 'Feet'):
+        for pat in (r'_class = "MovementSettings"', r'_class = "Feet"', r'game_class = "character_arm_config"'):
             while True:
-                hit = next((i for i,l in enumerate(L) if f'_class = "{cls}"' in l), None)
-                if hit is None: break
-                s, e = find_block(L, hit); del L[s:e+1]; removed += 1
-        while True:
-            hit = next((i for i,l in enumerate(L) if 'game_class = "character_arm_config"' in l), None)
-            if hit is None: break
-            s, e = find_block(L, hit); del L[s:e+1]; removed += 1
-        if removed: log.append(f"stripped {removed} AnimGraph1-era node(s)")
+                hit = find(pat)
+                if hit < 0: break
+                s, e = find_block(L, hit); del L[s:e+1]
 
-    # ---- 9. physics body markup --------------------------------------------
-    if add_phys and 'CPhysicsBodyGameMarkupData' not in '\n'.join(L):
-        gd = next((i for i,l in enumerate(L) if '_class = "GameDataList"' in l), None)
-        if gd is not None:
-            k = next((i for i in range(gd+1, min(gd+6, len(L)))
-                      if L[i].strip() == 'children ='), None)
-            if k is not None:
-                ind = L[k][:len(L[k]) - len(L[k].lstrip('\t'))] + '\t'
-                blk = [f'{ind}{{', f'{ind}\t_class = "GenericGameData"', f'{ind}\tname = ""',
-                       f'{ind}\tgame_class = "CPhysicsBodyGameMarkupData"', f'{ind}\tgame_keys = ',
-                       f'{ind}\t{{', f'{ind}\t\tm_PhysicsBodyMarkupByBoneName = ', f'{ind}\t\t{{']
-                for b in PHYS_BODIES:
-                    blk += [f'{ind}\t\t\t{b} = ', f'{ind}\t\t\t{{',
-                            f'{ind}\t\t\t\tm_TargetBody = "{b}"', f'{ind}\t\t\t\tm_Tag = ""',
-                            f'{ind}\t\t\t}}']
-                blk += [f'{ind}\t\t}}', f'{ind}\t}}', f'{ind}}},']
-                L[k+2:k+2] = blk
-                log.append(f"added CPhysicsBodyGameMarkupData ({len(PHYS_BODIES)} bodies)")
+        al = find(r'_class = "AttachmentList"')
+        if al >= 0:
+            bones_now = [re.match(r'^\s*name = "([^"]+)"', L[i]).group(1) for i in range(1, len(L))
+                         if re.search(r'_class = "Bone"', L[i-1], re.I) and re.match(r'^\s*name = "([^"]+)"', L[i])]
+            for att, bone, org, ang in (('weapon_hand_r', 'hand_R', '-2.6, -1.4, 0.0', '0.0, -179.999985, 0.0'),
+                                        ('weapon_hand_l', 'hand_L', '2.6, 1.4, 0.0', '0.0, 0.0, 179.999985')):
+                rb = next((b for b in bones_now if b.lower() == bone.lower()), None)
+                if not rb: continue
+                for i in range(al, len(L)):
+                    if not re.search(rf'^\s*name = "{att}"\s*$', L[i], re.I): continue
+                    for j in range(i + 1, min(i + 8, len(L))):
+                        if re.search(r'^\s*parent_bone = ', L[j], re.I):
+                            L[j] = _prefix(L[j], 'parent_bone') + 'parent_bone = "' + rb + '"'
+                        if re.search(r'^\s*relative_origin = ', L[j], re.I):
+                            L[j] = _prefix(L[j], 'relative_origin') + 'relative_origin = [ ' + org + ' ]'
+                        if re.search(r'^\s*relative_angles = ', L[j], re.I):
+                            L[j] = _prefix(L[j], 'relative_angles') + 'relative_angles = [ ' + ang + ' ]'
+                        if L[j].strip() == '},': break
+                    log.append(f"repointed {att} to {rb}")
+                    break
+            if not re.search(r'name = "weapon_center"', '\n'.join(L), re.I):
+                al_ind = _prefix(L[al], '_class')
+                ak = next((i for i in range(al + 1, min(al + 6, len(L)))
+                           if L[i].strip() == 'children =' and _prefix(L[i], 'children') == al_ind), -1)
+                if ak >= 0:
+                    ei = al_ind + '\t'
+                    L[ak+2:ak+2] = [f'{ei}{{', f'{ei}\t_class = "Attachment"', f'{ei}\tname = "weapon_center"',
+                                    f'{ei}\tignore_rotation = false', f'{ei}\tparent_bone = ""',
+                                    f'{ei}\trelative_origin = [ 0.0, 0.0, 40.0 ]',
+                                    f'{ei}\trelative_angles = [ 0.0, 0.0, 0.0 ]', f'{ei}\tweight = 1.0', f'{ei}}},']
 
-    out = '\n'.join(L)
-    if out.count('{') != out.count('}') or out.count('[') != out.count(']'):
-        raise RuntimeError(f"brace mismatch {{{out.count('{')}/{out.count('}')}}} "
-                           f"[{out.count('[')}/{out.count(']')}] - refusing to write")
+    # the physics body markup Valve's agents carry
+    if strip_ag1 and not re.search('CPhysicsBodyGameMarkupData', '\n'.join(L), re.I):
+        gd = find(r'_class = "GameDataList"')
+        k = next((i for i in range(gd + 1, min(gd + 6, len(L))) if L[i].strip() == 'children ='), -1) if gd >= 0 else -1
+        if k >= 0:
+            ind = _prefix(L[k], 'children') + '\t'
+            blk = [f'{ind}{{', f'{ind}\t_class = "GenericGameData"', f'{ind}\tname = ""',
+                   f'{ind}\tgame_class = "CPhysicsBodyGameMarkupData"', f'{ind}\tgame_keys = ',
+                   f'{ind}\t{{', f'{ind}\t\tm_PhysicsBodyMarkupByBoneName = ', f'{ind}\t\t{{']
+            for b in PHYS_BODIES:
+                blk += [f'{ind}\t\t\t{b} = ', f'{ind}\t\t\t{{',
+                        f'{ind}\t\t\t\tm_TargetBody = "{b}"', f'{ind}\t\t\t\tm_Tag = ""',
+                        f'{ind}\t\t\t}}']
+            blk += [f'{ind}\t\t}}', f'{ind}\t}}', f'{ind}}},']
+            L[k+2:k+2] = blk
+            log.append(f"added CPhysicsBodyGameMarkupData ({len(PHYS_BODIES)} bodies)")
+
+    if not _balanced(L):
+        raise RuntimeError("brace mismatch - refusing to write")
     shutil.copy(path, str(path) + '.bak')
-    path.write_text(out, encoding='utf-8')
+    path.write_text('\n'.join(L), encoding='utf-8')
     return log
 
 
@@ -442,7 +642,7 @@ def rebuild_vmat(s2v, vmat_c: Path):
     groups = [('m_intParams', False), ('m_floatParams', False), ('m_vectorParams', True),
               ('m_textureParams', True), ('m_intAttributes', False)]
     for key, quote in groups:
-        m = re.search(re.escape(key) + r'\s*=\s*\n?\s*\[(.*?)\n\t\]', t, re.S)
+        m = re.search(re.escape(key) + r'\s*=\s*\r?\n?\s*\[(.*?)\r?\n[ \t]*\]', t, re.S)
         if not m: continue
         for e in re.finditer(r'\{(.*?)\}', m.group(1), re.S):
             n = re.search(r'm_name\s*=\s*"([^"]*)"', e.group(1))
@@ -492,22 +692,44 @@ def fix_materials(mat: Path):
 
 
 # ── commands ─────────────────────────────────────────────────────────────────
+def is_body(data):
+    """pelvis plus a leg: the minimal signature of a player model's skeleton.
+    Filters viewmodel arms, props and map stubs whatever they are called."""
+    m = re.search(r'm_modelSkeleton\s*=\s*\{\s*m_boneName\s*=\s*\[(.*?)\]', data, re.S)
+    if not m: return False
+    bones = [b.lower() for b in re.findall(r'"([^"]+)"', m.group(1))]
+    return 'pelvis' in bones and ('leg_upper_l' in bones or 'leg_upper_r' in bones)
+
+
 def discover(s2v, vpk=None, source=None):
-    """Returns {name: {'root': path, 'file': Path|None}}."""
+    """Returns {name: {'dir': folder inside the addon, 'file': Path|None}}."""
     out = {}
     if source:
         for f in Path(source).rglob('*.vmdl_c'):
             d = s2v_data(s2v, f)
             mn = re.search(r'm_name\s*=\s*"([^"]+)"', d)
-            if not mn or 'm_modelSkeleton' not in d: continue
+            if not mn or not is_body(d): continue
             intern = re.sub(r'\.vmdl$', '', mn.group(1))
-            out[Path(intern).name] = {'root': str(Path(intern).parent.parent), 'file': f}
+            # the model's OWN folder from m_name - not <root>/<name>; packs do
+            # not always name the folder after the model
+            out[Path(intern).name] = {'dir': str(Path(intern).parent).replace('\\', '/'), 'file': f}
     else:
         if not Path(vpk).exists():
             die(f"vpk not found: {vpk}")
         listing = run([s2v, "-i", vpk, "-l", "-e", "vmdl_c"])
         for m in re.finditer(r'([a-zA-Z0-9_/]+)/([a-zA-Z0-9_]+)/\2\.vmdl_c', listing):
-            out[m.group(2)] = {'root': m.group(1), 'file': None}
+            out.setdefault(m.group(2), {'dir': f"{m.group(1)}/{m.group(2)}", 'file': None})
+        if not out:
+            # no <name>/<name>.vmdl_c layout at all: every large, non-arms model
+            for ln in listing.split('\n'):
+                m = re.search(r'([a-zA-Z0-9_/\-]+)/([a-zA-Z0-9_\-]+)\.vmdl_c', ln)
+                if not m: continue
+                nm = m.group(2)
+                if re.search(r'(_arms?|_pm_arm|viewmodel)$', nm) or re.search(r'_arms?_', nm) or nm.startswith('v_'):
+                    continue
+                sz = re.search(r'size:(\d+)', ln)
+                if sz and int(sz.group(1)) < 100000: continue
+                out.setdefault(nm, {'dir': m.group(1), 'file': None})
     return out
 
 
@@ -538,55 +760,73 @@ def cmd_port(a, cfg):
         sys.exit(1)
     if kind: say(f"compiler will run via {kind}", 'd')
 
-    ok, bad = [], []
+    ver = next((l.strip() for l in run([s2v, "--version"]).split('\n') if re.search(r'\d+\.\d+', l)), '')
+    if ver: say(f"Source2Viewer-CLI {ver}", 'd')
+
+    ok, bad, skipped = [], [], []
     started = time.time()
     for n, m in enumerate(todo, 1):
         label = re.sub(r'_player_model$', '', m)
         print(f"\n{C['b']}=== [{n}/{len(todo)}] {label} ==={C['x']}")
         try:
-            root = models[m]['root']
-            d = out_root/root/m
+            d = out_root/models[m]['dir']
             vmdl = d/f"{m}.vmdl"
-            mat = d/"materials"
-            done = cs2/"game/csgo_addons"/a.addon/root/m/f"{m}.vmdl_c"
+            done = cs2/"game/csgo_addons"/a.addon/models[m]['dir']/f"{m}.vmdl_c"
             if done.exists() and not a.force:
                 say("  already compiled - skipping (--force to redo)", 'd'); ok.append(m); continue
 
             print("  extracting...")
             if a.source:
-                run([s2v, "-i", models[m]['file'], "-o", vmdl, "-d"])
-                src_mat = models[m]['file'].parent/"materials"
-                if src_mat.exists():
-                    mat.mkdir(parents=True, exist_ok=True)
-                    for f in src_mat.iterdir():
-                        if f.is_file(): shutil.copy(f, mat/f.name)
+                src = models[m]['file']
+                run([s2v, "-i", src, "-o", vmdl, "-d"])
+                # every compiled material and texture under the model's folder,
+                # mirrored - packs use materials/, mat/, or nest deeper
+                for f in src.parent.rglob('*'):
+                    if f.is_file() and f.name.endswith(('.vmat_c', '.vtex_c')):
+                        tgt = d/f.relative_to(src.parent)
+                        tgt.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy(f, tgt)
+                # textures to .png BEFORE the sweep below, or the materials
+                # point at images that are not there
+                for vt in d.rglob('*.vtex_c'):
+                    png = vt.with_name(vt.name[:-len('.vtex_c')] + '.png')
+                    if not png.exists(): run([s2v, "-i", vt, "-o", png, "-d"])
             else:
-                run([s2v, "-i", a.vpk, "-o", out_root, "-f", f"{root}/{m}/", "-d"])
+                run([s2v, "-i", a.vpk, "-o", out_root, "-f", f"{models[m]['dir']}/", "-d"])
+                run([s2v, "-i", a.vpk, "-o", out_root, "-f", f"{models[m]['dir']}/", "-e", "vmat_c"])
             if not vmdl.exists(): raise RuntimeError("no .vmdl produced")
 
-            have_vmat = list(mat.glob('*.vmat')) if mat.exists() else []
-            if not have_vmat:
-                print("  no .vmat from decompile - rebuilding from compiled data")
-                if not a.source:
-                    run([s2v, "-i", a.vpk, "-o", out_root, "-f", f"{root}/{m}/", "-e", "vmat_c"])
-                nr = sum(rebuild_vmat(s2v, v) for v in mat.glob('*.vmat_c')) if mat.exists() else 0
-                print(f"  rebuilt {nr} material(s)")
-                if nr == 0: raise RuntimeError("could not rebuild any materials")
+            # rebuild, one at a time, every material Source2Viewer could not
+            # decompile (its shader version is newer than it supports)
+            vmat_c = sorted(d.rglob('*.vmat_c'))
+            missing = [v for v in vmat_c if not v.with_suffix('.vmat').exists()]
+            if missing:
+                print(f"  no .vmat from decompile for {len(missing)} material(s) - rebuilding from compiled data")
+                print(f"  rebuilt {sum(rebuild_vmat(s2v, v) for v in missing)} material(s)")
+            if vmat_c and not list(d.rglob('*.vmat')):
+                raise RuntimeError("could not rebuild any materials")
 
             for stray in d.rglob('*_c'):
                 if stray.is_file(): stray.unlink()
 
-            ren, fx = fix_materials(mat)
+            ren = fx = 0
+            for md in sorted({p.parent for p in d.rglob('*') if p.suffix in ('.vmat', '.png', '.tga')}):
+                r1, f1 = fix_materials(md); ren += r1; fx += f1
             print(f"  materials: {fx} fixed, {ren} textures renamed")
 
-            for line in port_vmdl(vmdl, strip_ag1=not a.keep_ag1):
-                print(f"  {line}")
+            try:
+                for line in port_vmdl(vmdl, strip_ag1=not a.keep_ag1):
+                    print(f"  {line}")
+            except NotPlayerModel:
+                say("  not a player model (no pelvis bone) - skipped", 'd'); skipped.append(m); continue
 
-            txt = vmdl.read_text(errors='replace')
+            txt = vmdl.read_text(encoding='utf-8-sig', errors='replace')
             counts = {k: txt.count(k) for k in ('vanmgrph', 'vnmgraph', 'wpnPivot', 'vnmskel')}
             print("  counts  " + " ".join(f"{k}={v}" for k, v in counts.items()) +
                   "  (want 0 4 1 2)")
-            if counts['vanmgrph'] or counts['vnmgraph'] != 4:
+            # Valve ships 4 graph references, the fourth a duplicate of the
+            # worldmodel graph; ports by other authors use 3 and work
+            if counts['vanmgrph'] or counts['vnmgraph'] < 3 or counts['vnmskel'] < 2:
                 raise RuntimeError("port did not apply cleanly")
 
             if not kind:
@@ -606,8 +846,9 @@ def cmd_port(a, cfg):
                 for l in log.split('\n'):
                     if 'ERROR' in l or 'Error!' in l: say("    " + l.strip(), 'r')
                 raise RuntimeError("compile failed")
-            sz = done.stat().st_size if done.exists() else '?'
-            say(f"  OK  {sz} bytes", 'g')
+            if not done.exists():
+                raise RuntimeError("compiler reported no error but wrote no .vmdl_c")
+            say(f"  OK  {done.stat().st_size} bytes", 'g')
             ok.append(m)
         except Exception as ex:
             say(f"  FAILED: {ex}", 'r'); bad.append(f"{label} ({ex})")
@@ -617,6 +858,7 @@ def cmd_port(a, cfg):
     verb = "prepared" if not kind else "ported"
     print(f"{verb} : {len(ok)}   failed : {len(bad)}   took : {int(el//60)}m{int(el%60):02d}s")
     for b in bad: say("   " + b, 'r')
+    if skipped: say(f"skipped: {len(skipped)} file(s) with no pelvis bone - not player models: {', '.join(skipped)}", 'd')
     if ok and not kind:
         print()
         say("Sources are ready but not compiled. To finish on a Windows machine:", 'y')
@@ -631,7 +873,12 @@ def cmd_port(a, cfg):
 def cmd_verify(a, cfg):
     cs2 = Path(cfg['cs2']); s2v = Path(cfg['s2v'])
     root = cs2/"game/csgo_addons"/a.addon
-    files = [f for f in root.rglob('*.vmdl_c') if f.stem == f.parent.name]
+    every = list(root.rglob('*.vmdl_c'))
+    tidy = [f for f in every if f.stem == f.parent.name]
+    other = [f for f in every if f.stem != f.parent.name and f.stat().st_size >= 100000
+             and not re.search(r'(_arms?|_pm_arm|viewmodel)$', f.stem) and not re.search(r'_arms?_', f.stem)
+             and not f.stem.startswith('v_')]
+    files = tidy + other
     if a.model:
         files = [f for f in files if f.stem in (a.model, f"{a.model}_player_model")]
     if not files: die(f"no compiled models under {root}")
@@ -639,32 +886,47 @@ def cmd_verify(a, cfg):
     npass = nwarn = nfail = 0
     for f in sorted(files):
         label = re.sub(r'_player_model$', '', f.stem)
-        d = s2v_data(s2v, f); r = s2v_data(s2v, f, "RERL")
+        d = s2v_data(s2v, f)
+        # in a mixed addon, a non-tidy file whose skeleton has no body is not a
+        # player model; one whose skeleton cannot be read is still checked
+        if tidy and f in other and re.search(r'm_modelSkeleton', d) and not is_body(d):
+            continue
+        r = s2v_data(s2v, f, "RERL")
         refs = d + r
         bad, warn = [], []
         if refs.count('.vanmgrph'): bad.append("still references AnimGraph1")
         if 'animsets/' in refs: bad.append("still references a legacy animset")
-        if refs.count('.vnmgraph') < 4: bad.append("fewer than 4 vnmgraph refs")
+        vg = refs.count('.vnmgraph')
+        if vg < 3: bad.append(f"{vg} graph reference(s), expected at least 3")
+        elif vg == 3: warn.append("3 graph references, not the 4 Valve ships - probably fine")
         if refs.count('.vnmskel') < 2: bad.append("fewer than 2 vnmskel refs")
 
         bones, hier, pos = model_skeleton(d)
-        missC = [b for b in CRITICAL if b not in bones]
-        missI = [b for b in IMPORTANT if b not in bones]
-        if missC: bad.append("missing critical bone(s): " + ", ".join(missC))
-        if missI: warn.append("no toe bones: " + ", ".join(missI))
+        if not bones: bad.append("no m_modelSkeleton in DATA")
+        # names are case-sensitive to AG2: hand_l does not bind as hand_L
+        case = lambda want: next((b for b in bones if b.lower() == want.lower() and b != want), None)
+        case_c = [f"{case(b)} (needs {b})" for b in CRITICAL if b not in bones and case(b)]
+        case_i = [f"{case(b)} (needs {b})" for b in IMPORTANT if b not in bones and case(b)]
+        miss_c = [b for b in CRITICAL if b not in bones and not case(b)]
+        miss_i = [b for b in IMPORTANT if b not in bones and not case(b)]
+        if case_c: bad.append("bone name case does not match the AG2 skeleton: " + ", ".join(case_c))
+        if case_i: warn.append("optional bone name case does not match: " + ", ".join(case_i))
+        if bones and miss_c: bad.append("missing critical bone(s): " + ", ".join(miss_c))
+        if miss_i: warn.append("optional bone(s) missing: " + ", ".join(miss_i))
         if hier:
-            mism = [b for b in PARENT if b in bones and hier.get(b) != PARENT[b]]
+            mism = [b for b in PARENT if b in bones and PARENT[b] in bones and hier.get(b) != PARENT[b]]
             if mism: bad.append("wrong parent on: " + ", ".join(mism))
-            if 'root_motion' not in [b for b in bones if hier.get(b) == '']:
-                bad.append("root_motion is not a root")
+            roots = [b for b in bones if hier.get(b) == '']
+            if 'root_motion' not in roots: bad.append("root_motion is not a root")
+            extra = [b for b in roots if b != 'root_motion']
+            if extra: warn.append("bone(s) outside root_motion, never animated: " + ", ".join(extra))
         if pos and abs(pos[2]) > abs(pos[1]):
-            bad.append(f"pelvis {pos} is Z-up - not converted into root_motion space, "
-                       "model will be rotated")
+            warn.append("pelvis [%.2f, %.2f, %.2f] - unusual orientation, check it stands upright" % tuple(pos))
 
         fingers = len([b for b in bones if b.startswith('finger_')])
         print(f"\n{C['b']}=== {label} ==={C['x']}")
-        print(f"  core {len(CRITICAL)-len(missC)}/{len(CRITICAL)}   "
-              f"toes {len(IMPORTANT)-len(missI)}/2   fingers {fingers}   bones {len(bones)}")
+        print(f"  core {len([b for b in CRITICAL if b in bones])}/{len(CRITICAL)}   "
+              f"optional {len([b for b in IMPORTANT if b in bones])}/{len(IMPORTANT)}   fingers {fingers}   bones {len(bones)}")
         if pos: print("  pelvis [%.2f, %.2f, %.2f] (height should be the middle value)" % tuple(pos))
         if bad:
             say("  [FAIL]", 'r'); [say("     - " + b, 'r') for b in bad]; nfail += 1
@@ -744,18 +1006,27 @@ def cmd_setup(a, cfg):
         if re.search(r'"include"\s+"characters"', txt):
             ok(True, "gameinfo.gi already has the characters include")
         else:
-            bak = Path(str(gi) + '.bak')
-            if not bak.exists(): shutil.copy(gi, bak)
-            lines = txt.split('\n')
+            # edited as raw text - same line endings and encoding, one line
+            # added - so clean can take exactly that line out again
+            raw = gi.read_bytes()
+            bom = raw.startswith(b'\xef\xbb\xbf')
+            text = raw.decode('utf-8-sig')
+            nl = '\r\n' if '\r\n' in text else '\n'
+            lines = re.split(r'\r?\n', text)
             idx = next((i for i,l in enumerate(lines)
                         if re.search(r'"include"\s+"maps"\s*$', l)), -1)
             if idx < 0:
-                ok(False, "could not find VpkDirectories - add the include by hand")
+                ok(False, "could not find VpkDirectories in gameinfo.gi")
+                say('         add this line by hand, inside VpkDirectories, below "include" "maps":', 'y')
+                say('             "include"       "characters"', 'y')
             else:
                 ind = re.sub(r'"include".*$', '', lines[idx])
                 lines.insert(idx+1, f'{ind}"include"       "characters"')
                 try:
-                    gi.write_text('\n'.join(lines))
+                    # back up what is there NOW - one from an older CS2 build
+                    # would roll the file back on clean
+                    Path(str(gi) + '.bak').write_bytes(raw)
+                    gi.write_bytes((b'\xef\xbb\xbf' if bom else b'') + nl.join(lines).encode('utf-8'))
                     ok(True, "gameinfo.gi patched (backup at gameinfo.gi.bak)")
                 except PermissionError:
                     ok(False, f"gameinfo.gi not writable - check permissions on {gi}")
@@ -832,12 +1103,19 @@ def cmd_clean(a, cfg):
     for t in targets:
         if t.exists(): shutil.rmtree(t); say(f"  removed {t}", 'g')
     if patched:
-        if bak.exists():
-            shutil.copy(bak, gi); bak.unlink(); say("  restored gameinfo.gi from backup", 'g')
+        raw = gi.read_bytes()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        text = raw.decode('utf-8-sig')
+        nl = '\r\n' if '\r\n' in text else '\n'
+        unpatched = nl.join(l for l in re.split(r'\r?\n', text) if not re.search(r'"include"\s+"characters"', l))
+        norm = lambda t: t.replace('\r\n', '\n').rstrip()
+        if bak.exists() and norm(bak.read_bytes().decode('utf-8-sig')) == norm(unpatched):
+            shutil.copy(bak, gi); say("  restored gameinfo.gi from backup", 'g')
         else:
-            keep = [l for l in gi.read_text(errors='replace').split('\n')
-                    if not re.search(r'"include"\s+"characters"', l)]
-            gi.write_text('\n'.join(keep)); say("  removed the characters include", 'y')
+            # no backup, or one from an older CS2 build: take out only our line
+            gi.write_bytes((b'\xef\xbb\xbf' if bom else b'') + unpatched.encode('utf-8'))
+            say("  removed the characters include from gameinfo.gi", 'g')
+        if bak.exists(): bak.unlink()
     print()
     return 0
 
