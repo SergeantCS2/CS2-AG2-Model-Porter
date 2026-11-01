@@ -46,6 +46,10 @@ function Write-Json([string]$path, $obj) {
     [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Depth 12), $Utf8)
 }
 function Invoke-Script([string]$name, [string[]]$arguments) {
+    # Windows PowerShell 5.1 turns a child's stderr into a terminating error
+    # under 'Stop' once it is redirected - and several cases here write errors
+    # on purpose. Capture them as text instead.
+    $ErrorActionPreference = 'Continue'
     $out = & $PSExe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Repo $name) @arguments 2>&1 | Out-String
     return @{ Out = $out; Exit = $LASTEXITCODE }
 }
