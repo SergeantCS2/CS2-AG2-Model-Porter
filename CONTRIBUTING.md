@@ -96,7 +96,26 @@ a model animates; that is still only testable in game. Before a release:
 3. `Verify-Model.ps1 -All` clean
 4. at least one model loaded on a server and observed animating
 
+The suite also runs the Linux port's model edits (`linux/ag2port.py`) on the
+same models and fails unless its `.vmdl` matches Windows'. A change to
+`AG2-All.ps1` needs the same change there.
+
 Syntax-checking PowerShell is not testing. An undefined variable parses fine and
 silently does nothing — that specific mistake cost several hours during
 development. So did `,` binding tighter than `+` in an array literal:
 `@("$a" + "b", "c")` is not two lines, it is one.
+
+## Releasing
+
+1. Set `$SCRIPT_VERSION` in every script and add a `## vX.Y.Z` section at the
+   top of `CHANGELOG.md`.
+2. Push a tag: `git tag vX.Y.Z` then `git push origin vX.Y.Z`.
+3. The *release* workflow builds `CS2-AG2-Model-Porter-windows.zip` and
+   `CS2-AG2-Model-Porter-linux.zip` and attaches them to a **draft** release,
+   with the CHANGELOG section as its text. It stops if the tag, the scripts and
+   the CHANGELOG disagree.
+4. Download the zips from the draft, check them, then publish.
+
+What goes in each zip is the list in `tools/package_release.py`. A new file
+users need has to be added there. Pull requests build both zips too, so a
+missing file fails before a release.

@@ -62,6 +62,20 @@ re-extracted the folder over the others' already-ported sources, so a later
 `-CompileOnly` could build them T-posing; a CS2 path typed into the wizard with
 a trailing `\` garbled the arguments of every script it ran.
 
+**FIXED:** `-CompileOnly` compiled every `<name>/<name>.vmdl` left in the
+addon, ported or not, so viewmodel arms extracted alongside a model were
+compiled too and then failed Verify. It now compiles every ported model
+(wherever it sits) and lists the rest without touching them.
+
+**CHANGED:** the experimental Linux port's model edits now match the Windows
+version's — the test suite runs both on the same models and requires the same
+`.vmdl` — including everything since 1.0.0 it was missing: any `root_motion`
+angle, creating `root_motion`, adopting stray roots, the up-axis correction,
+the weapon attachments and the fixes above. Its loose-file paths, material
+handling, Verify and `gameinfo.gi` handling are fixed too. It is still
+experimental and does less than Windows around the edits;
+[linux/README.md](linux/README.md) now says exactly what.
+
 **ADDED:** [PORTING-OTHER-GAMES.md](PORTING-OTHER-GAMES.md) — what it takes to
 bring Garry's Mod, SFM, HL2, TF2, CS:GO and other Source games' models to CS2,
 step by step, with `valvebiped_to_cs2.txt` (the full ValveBiped → CS2 bone map)
@@ -71,6 +85,10 @@ summarises it.
 **ADDED:** `tests\Run-Tests.ps1` — runs every script against synthetic models
 and stand-ins for Source2Viewer and `resourcecompiler`; no game files needed.
 Runs in GitHub Actions on Windows PowerShell 5.1.
+
+**ADDED:** release packaging. Pushing a version tag builds both downloads
+from a fixed file list and attaches them to a draft release, after checking
+the tag against every script's version and the CHANGELOG.
 
 **ADDED:** the Source2Viewer version is printed in every port log, and
 `Setup-AG2.ps1 -S2VVersion <release>` installs a specific release if a new one

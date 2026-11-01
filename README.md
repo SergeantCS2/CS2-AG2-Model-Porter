@@ -557,7 +557,10 @@ backup.
 | `canonical_skeleton.txt` | CS2's AG2 skeleton, bone by bone |
 | `valvebiped_to_cs2.txt` | Garry's Mod / HL2 bone names → CS2 |
 | `tools\blender_remap_weights.py` | Blender helper for the re-rig |
-| `tests\` | test suite — not needed to use the tool |
+
+The source repository also has `tests\` (the test suite) and
+`tools\package_release.py` (builds these downloads); neither is needed to use
+the tool.
 
 Every script runs standalone if you'd rather skip the wizard:
 `-Pack` / `-Vpk` / `-Source`, `-ListOnly`, `-Model` / `-All`, `-Force`,
@@ -567,14 +570,23 @@ Every script runs standalone if you'd rather skip the wizard:
 ## Linux
 
 > [!WARNING]
-> **Experimental and untested. Use this Windows version.**
+> **Experimental, and not tested in game. Use this Windows version if you can.**
 
-There's a Linux port as a separate download. The porting logic is verified
-identical, but `resourcecompiler` creates a **D3D graphics device** for GPU
-texture encoding, so running it under Wine is uncertain and unconfirmed. It has
-a `--no-compile` mode; `Port-Model.ps1 -CompileOnly` here finishes the job on a
-Windows box. Publishing needs Windows regardless — the Workshop Manager is
-GUI-only.
+There's a Linux port as a separate download, for preparing models on Linux.
+Its model edits are checked against this version's on every change — the test
+suite runs both on the same models and requires the same result — but the rest
+of it does less:
+
+- Workshop packs and `.vpk` files in the usual `<name>/<name>.vmdl_c` layout
+  only; models laid out differently in a mixed pack are left out
+- materials kept outside the model's own folder (as Valve's agents do) are not
+  fetched, and a missing material is not stubbed
+- compiling: `resourcecompiler` creates a **D3D graphics device** for GPU
+  texture encoding, so running it under Wine or Proton is unconfirmed
+
+The dependable route is `--no-compile` on Linux, then
+`Port-Model.ps1 -CompileOnly` here to finish the job on a Windows box.
+Publishing needs Windows regardless — the Workshop Manager is GUI-only.
 
 ## Thanks
 
