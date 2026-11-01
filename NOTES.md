@@ -97,9 +97,13 @@ Not a blocker. Worth watching if the model renders visibly deformed.
 
 Community models often carry three AnimGraph1-era nodes the reference does not: `MovementSettings`,
 `Feet`/`Foot`, and `character_arm_config`. The compiler accepts all three and
-AG2 appears not to read them — the reference model has none. They are left in
-place rather than stripped, because removing `character_arm_config` would take
-away first-person arms and the others are inert.
+AG2 appears not to read them — none of the three known-working AG2 models
+(Valve's `ctm_fbi` and `ctm_sas`, and the hand-ported reference) carries any of
+them. They are **stripped by default** to match those models. In AG2 first-person
+arms come from Valve's shared `glove_*` models, so `character_arm_config`
+pointing at an unported `*_pm_arm.vmdl` is dead weight. `-KeepAG1Nodes` keeps
+all three (and also skips the weapon-attachment and physics-markup edits) for
+anyone who needs to compare.
 
 The `Feet` node did reference lowercase bones (`ankle_l`) that do not exist on
 uppercase skeletons — a latent bug in the source pack's originals. Now corrected to match
@@ -128,11 +132,13 @@ because the same limits apply to anyone repeating this work:
 
 1. **Whether AG2 binds.** Static structure said it should. Only the game could
    confirm it. It does.
-2. **Weapon placement.** `wpnPivot`/`wpn` are at identity, not the model's real
-   weapon position. In the reference the two are exact negations (net zero), which is
-   consistent with the graph driving them — but if the body animates and the
-   gun sits wrong, that is the knob. the reference model's real values are in
-   `canonical_skeleton.txt`.
+2. **Weapon placement.** `wpnPivot`/`wpn` are grafted at CS2's canonical rest
+   values from `worldmodel.vnmskel` — `wpnPivot` at `[0, 58.78, -3.47]` in
+   ModelDoc's axis order, `wpn` its exact negation, netting to the root. That
+   matches the reference to five decimal places. The weapon itself hangs off
+   the `weapon_hand_*` attachments, which v1.2.0 re-parents to `hand_L`/`hand_R`
+   with Valve's offsets — community models had them on a legacy helper bone,
+   which is why guns sat on the floor between the feet.
 3. **Whether `PHYS` shrinkage matters.** Hit registration, not animation. Still
    unmeasured.
 4. **First-person arms.** A separate port entirely — `*_pm_arm.vmdl_c` carries
@@ -158,3 +164,77 @@ static analysis.
 and are a separate port. AG2 decouples arms from the player model — Valve ships
 them under `agents/models/shared/arms/glove_*` — so ported models fall back to
 CS2's standard arms, which is what Valve's own agents do.
+
+**Physics markup names.** The `CPhysicsBodyGameMarkupData` block is copied
+verbatim from the working models, and its body names are lowercase except one,
+`leg_upper_L`. Whether that is Valve's own quirk or a typo carried over has not
+been checked against a fresh `ctm_fbi`, and the block is added whether or not
+the model's physics shapes use those names. It governs ragdoll and hit
+reactions, not animation.
+
+---
+
+## 9. Found by the test suite (1.3.0)
+
+v1.3.0 added `tests\Run-Tests.ps1`: synthetic models in Source2Viewer's
+layout, run through the real scripts, with stand-ins for Source2Viewer and
+`resourcecompiler`. The first runs turned up these. Two were serious.
+
+**(a) Comma-decimal Windows wrote broken transforms — serious.** PowerShell's
+`-f` operator follows the Windows region setting. On German, French, Russian,
+Brazilian and many other installs, every converted origin and angle came out as
+`[ 0,000000, 42,123554, 0,458082 ]`, which KV3 reads as six numbers. The brace
+check passes, so nothing flagged it. Rebuilt materials had the same problem
+with colour vectors. All numbers are now written with the invariant culture,
+and a test runs the port under `de-DE`.
+
+**(b) A root_motion with no children received pelvis in the wrong place —
+serious.** The scan for root_motion's `children =` stopped only at a bare `}`,
+but a bone in an array closes with `},`. On a leaf root_motion it ran on and
+found the next `children =` at the same indent — a BodyGroup's — and grafted
+pelvis into that, while logging *grafted as first child of root_motion*. nozb1's
+root_motion holds IK targets, so it never triggered there. The search is now
+confined to the bone's own block.
+
+**(c) The up-axis check read a parented pelvis.** Once pelvis is under
+root_motion its origin is local, `[0, 42, 0]`, which reads as +Y-up. Any stray
+root adopted afterwards was turned 90°. The check now only runs on a root
+pelvis. Strays are also converted with root_motion's real angles rather than an
+assumed `[0, 90, 90]`.
+
+**(d) Half-ported models, either half.** A model with a graph list and no
+skeleton list got no skeleton references; one with a skeleton list and no graph
+list got a second skeleton list. Each list is now checked on its own.
+
+**(e) DMX patching reached other models.** The case-flip patched every `.dmx`
+in the folder, so in packs that share a folder it renamed joints in
+neighbouring models' meshes too. Only the meshes this model references are
+patched now.
+
+The test suite also pins the output for the common cases: for a nozb1-style
+model, the `.vmdl` written by 1.3.0 is byte-identical to 1.2.0's. The grafted
+pelvis is still indented one tab short of its new siblings, as it always has
+been — KV3 ignores whitespace, and changing it would only change every file.
+
+## 10. Models from other games
+
+The porter works because the community CS2 packs were rigged on CS2's own
+skeleton (section 1): same names, same rest pose within a fraction of a unit,
+so the edits are all about *references* and the bone hierarchy. A model from
+another game breaks both assumptions.
+
+- **Garry's Mod, SFM, HL2, TF2** use ValveBiped. Every bone has a different
+  name (`ValveBiped.Bip01_L_Forearm` for `arm_lower_L`), and the rest pose and
+  bone axes differ. A rename alone binds the mesh, then twists it as soon as
+  the graph rotates a bone around CS2's axes rather than the ones the mesh was
+  weighted against. The mesh has to be posed to CS2's rest pose and re-bound —
+  a re-rig, which needs judgement per model and is not scriptable reliably.
+- **CS:GO** agent-era player models already use CS2's names — CS2 inherited
+  the skeleton — so they are usually close enough to need conversion only.
+- **Other Source 2 games** have their own skeletons and need the same re-rig.
+
+The practical route, using a decompiled Valve agent as the template so the
+skeleton, AG2 lists, hitboxes and attachments are canonical from the start, is
+in [PORTING-OTHER-GAMES.md](PORTING-OTHER-GAMES.md).
+[`valvebiped_to_cs2.txt`](valvebiped_to_cs2.txt) maps every ValveBiped bone,
+including the helper bones whose weights fold into the main ones.

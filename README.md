@@ -6,7 +6,9 @@ They still load, textures are fine - they just stand there like a scarecrow in t
 Blender, no re-rigging.
 
 Works with Workshop packs, `.vpk` files on disk, or loose model files. Delisted
-packs are the whole point, or those lost to time.
+packs are the whole point, or those lost to time. Models from Garry's Mod,
+CS:GO and other Source games can be brought over too, after a conversion step:
+see [Porting from other games](PORTING-OTHER-GAMES.md).
 
 > [!IMPORTANT]
 > **This tool does not give you rights to anyone's models.**
@@ -177,7 +179,9 @@ pelvis [0.00, 42.12, 0.46] (height should be the middle value)
 [PASS]
 ```
 
-Tiered — a missing finger joint isn't a failure, a missing `hand_L` is.
+Tiered — a missing finger joint isn't a failure, a missing `hand_L` is. Bone
+names are checked case-sensitively, the way AnimGraph2 binds them: `hand_l` is
+not `hand_L`, and Verify says so by name.
 
 **5. Publish.** This is the only part with a GUI, and the only part the scripts
 can't do for you.
@@ -286,7 +290,24 @@ D:\extracted\                          <- point here, name doesn't matter
 
 Subfolders are searched. Folder names are irrelevant — each model records its
 own intended path internally. Files ending `_c` are compiled; that's what you
-want. Decompiled `.vmdl`/`.dmx` sources won't work, nor will CS:GO `.mdl`.
+want. Decompiled `.vmdl`/`.dmx` sources won't work here.
+
+For a Workshop pack, the tool looks in the Steam library CS2 is installed in,
+so packs on a second drive are found as long as `-CS2Path` (or the wizard)
+points at that CS2.
+
+### From other games
+
+Garry's Mod, SFM, HL2, TF2 and CS:GO models are Source 1 `.mdl` files, and
+this tool doesn't read them directly. They're rigged for other games'
+skeletons, and CS2's animations only drive CS2's. CS:GO player models usually
+share CS2's skeleton already; Garry's Mod playermodels (ValveBiped) need
+re-rigging in Blender. After that, this tool compiles and verifies them like
+anything else.
+
+**→ [Porting from other games](PORTING-OTHER-GAMES.md)**: what works, the
+tools for each step, and [`valvebiped_to_cs2.txt`](valvebiped_to_cs2.txt), the
+full bone map.
 
 ---
 
@@ -401,7 +422,8 @@ Test-Path "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global O
 ```
 
 `False` means the DLC isn't installed, or CS2 is on another drive — pass
-`-CS2Path`.
+`-CS2Path`. The wizard finds other drives on its own, including a Steam install
+that isn't on `C:`.
 </details>
 
 <details>
@@ -410,22 +432,35 @@ Test-Path "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global O
 Steam doesn't download workshop content until the game runs. Subscribe, launch
 CS2, quit, retry. If the item was removed from the Workshop you can't subscribe
 — use `-Vpk` or `-Source` with a local copy. Worse case, unsub and launch, then sub & launch again.
+
+Workshop content lives in the same Steam library as the game:
+`<library>\steamapps\workshop\content\730\<id>`. Before 1.3.0 the scripts
+only looked in the `C:` library, so a pack on another drive was reported
+missing even when it was there. Update if you're on an older version.
 </details>
 
 <details>
 <summary><b>Compile fails on missing materials</b></summary>
 
-Source2Viewer can't decompile CS2 materials on a PC that *has* CS2 installed —
-it finds the shader, chokes on the version, writes nothing. Works fine without
-CS2, which made this take embarrassingly long to find. The scripts detect it and
-rebuild from the compiled files. `rebuilt 0 material(s)` means the raw extract
-failed — check your pack ID.
+Source2Viewer can't decompile CS2 materials whose shader version it doesn't
+support — on a PC that *has* CS2 installed it finds the shader, chokes on the
+version, writes nothing. Works fine without CS2, which made this take
+embarrassingly long to find. The scripts detect it and rebuild each affected
+material from its compiled file; newer Source2Viewer releases may decompile
+them directly, and either way works. `rebuilt 0 material(s)` means the raw
+extract failed — check your pack ID.
 
-Materials don't always sit beside the model. Valve's own agents keep the model
-under `agents/models/<name>/` and its materials under
-`characters/models/<name>/materials/`. The scripts read the compiled model's
-resource list and pull in anything outside the model folder — you'll see
-`materials live elsewhere: <path>` when that happens.
+Materials don't always sit beside the model, or in a folder called
+`materials`. Valve's own agents keep the model under `agents/models/<name>/`
+and its materials under `characters/models/<name>/materials/`; packs use
+`mat/`, nest deeper, or keep them next to the model. The scripts read the
+compiled model's resource list and take materials from wherever it says —
+you'll see `materials live elsewhere: <path>` when they're outside the model's
+folder.
+
+A model that uses CS2's own materials keeps using them — they come from the
+game, and nothing is copied into your addon for them. A material the pack
+itself is missing gets a plain placeholder and a warning.
 </details>
 
 <details>
@@ -445,15 +480,21 @@ In this order — the first two are far more likely than the third:
    Did you change map after joining?
 2. **Old pack still mounted?** Remove its ID from `mm_extra_addons`.
 3. Only then is it the model. Try
-   `.\Port-Model.ps1 -Model <name> -KeepAG1Nodes`, which flips one of the
-   riskier calls.
+   `.\Port-Model.ps1 -Model <name> -Force -KeepAG1Nodes`, which flips one of
+   the riskier calls (`-Force`, or the already-compiled model is skipped).
 </details>
 
 <details>
 <summary><b>Model is sideways or upside down</b></summary>
 
 The pelvis transform didn't apply. `Verify-Model.ps1` catches this — look for
-`pelvis position ... is Z-up`. Height should be the **middle** of three numbers.
+`unusual orientation` next to the pelvis position. Height should be the
+**middle** of three numbers.
+
+On a Windows set to a language that writes decimals with a comma (German,
+French, Spanish, Portuguese, Russian, Polish and many more), versions before
+1.3.0 wrote bone positions as `42,123554`, which the model format reads as two
+numbers. Update, then re-port those models with `-Force`.
 </details>
 
 <details>
@@ -474,12 +515,29 @@ separate job.
 </details>
 
 <details>
+<summary><b>It broke after Source2Viewer updated</b></summary>
+
+Setup installs the newest Source2Viewer, and its output is what the scripts
+read. Every port log starts with the version it used. If a new release breaks
+porting, go back to the last one that worked and open an issue with both
+version numbers:
+
+```powershell
+.\Setup-AG2.ps1 -Force -S2VVersion 20.1
+```
+</details>
+
+<details>
 <summary><b>Put my PC back how it was</b></summary>
 
 ```powershell
 .\Cleanup-AG2.ps1            # shows what it would delete
-.\Cleanup-AG2.ps1 -Remove    # deletes it, restores gameinfo.gi
+.\Cleanup-AG2.ps1 -Remove    # deletes it, undoes the gameinfo.gi change
 ```
+
+`gameinfo.gi` goes back to exactly what CS2 shipped. If CS2 has updated since
+setup, only the added line is removed, rather than restoring an outdated
+backup.
 </details>
 
 ## Files
@@ -495,10 +553,16 @@ separate job.
 | `Verify-Model.ps1` | check before publishing |
 | `Cleanup-AG2.ps1` | undo everything |
 | [`NOTES.md`](NOTES.md) | technical writeup |
+| [`PORTING-OTHER-GAMES.md`](PORTING-OTHER-GAMES.md) | Garry's Mod, CS:GO and other games |
+| `canonical_skeleton.txt` | CS2's AG2 skeleton, bone by bone |
+| `valvebiped_to_cs2.txt` | Garry's Mod / HL2 bone names → CS2 |
+| `tools\blender_remap_weights.py` | Blender helper for the re-rig |
+| `tests\` | test suite — not needed to use the tool |
 
 Every script runs standalone if you'd rather skip the wizard:
 `-Pack` / `-Vpk` / `-Source`, `-ListOnly`, `-Model` / `-All`, `-Force`,
-`-CS2Path`, `-Addon`, `-KeepAG1Nodes`, `-CompileOnly`.
+`-CS2Path`, `-Addon`, `-KeepAG1Nodes`, `-CompileOnly`, and on Setup
+`-S2VVersion`.
 
 ## Linux
 
