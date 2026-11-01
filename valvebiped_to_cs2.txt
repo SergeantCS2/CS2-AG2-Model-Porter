@@ -1,0 +1,86 @@
+# ValveBiped (Garry's Mod, HL2, SFM, TF2-era playermodels) -> CS2 AG2 skeleton
+#
+# <ValveBiped bone> TAB <CS2 bone>. Used when re-rigging a Source 1 model onto
+# CS2's skeleton - see PORTING-OTHER-GAMES.md. tools/blender_remap_weights.py
+# reads this file. CS2 names are case-sensitive: hand_L, not hand_l.
+#
+# Renaming bones is NOT enough on its own: the mesh must also be posed to match
+# CS2's rest pose before it is bound to CS2's skeleton. The guide covers it.
+#
+# CS2 has four spine bones and ValveBiped usually has four too - Spine, Spine1,
+# Spine2 and Spine4 (there is normally no Spine3). The finger metacarpals
+# (finger_*_meta_L/R) have no ValveBiped equivalent and are optional.
+
+ValveBiped.Bip01_Pelvis	pelvis
+ValveBiped.Bip01_Spine	spine_0
+ValveBiped.Bip01_Spine1	spine_1
+ValveBiped.Bip01_Spine2	spine_2
+ValveBiped.Bip01_Spine4	spine_3
+ValveBiped.Bip01_Neck1	neck_0
+ValveBiped.Bip01_Head1	head_0
+
+ValveBiped.Bip01_L_Clavicle	clavicle_L
+ValveBiped.Bip01_L_UpperArm	arm_upper_L
+ValveBiped.Bip01_L_Forearm	arm_lower_L
+ValveBiped.Bip01_L_Hand	hand_L
+ValveBiped.Bip01_L_Finger0	finger_thumb_0_L
+ValveBiped.Bip01_L_Finger01	finger_thumb_1_L
+ValveBiped.Bip01_L_Finger02	finger_thumb_2_L
+ValveBiped.Bip01_L_Finger1	finger_index_0_L
+ValveBiped.Bip01_L_Finger11	finger_index_1_L
+ValveBiped.Bip01_L_Finger12	finger_index_2_L
+ValveBiped.Bip01_L_Finger2	finger_middle_0_L
+ValveBiped.Bip01_L_Finger21	finger_middle_1_L
+ValveBiped.Bip01_L_Finger22	finger_middle_2_L
+ValveBiped.Bip01_L_Finger3	finger_ring_0_L
+ValveBiped.Bip01_L_Finger31	finger_ring_1_L
+ValveBiped.Bip01_L_Finger32	finger_ring_2_L
+ValveBiped.Bip01_L_Finger4	finger_pinky_0_L
+ValveBiped.Bip01_L_Finger41	finger_pinky_1_L
+ValveBiped.Bip01_L_Finger42	finger_pinky_2_L
+ValveBiped.Bip01_L_Thigh	leg_upper_L
+ValveBiped.Bip01_L_Calf	leg_lower_L
+ValveBiped.Bip01_L_Foot	ankle_L
+ValveBiped.Bip01_L_Toe0	ball_L
+
+ValveBiped.Bip01_R_Clavicle	clavicle_R
+ValveBiped.Bip01_R_UpperArm	arm_upper_R
+ValveBiped.Bip01_R_Forearm	arm_lower_R
+ValveBiped.Bip01_R_Hand	hand_R
+ValveBiped.Bip01_R_Finger0	finger_thumb_0_R
+ValveBiped.Bip01_R_Finger01	finger_thumb_1_R
+ValveBiped.Bip01_R_Finger02	finger_thumb_2_R
+ValveBiped.Bip01_R_Finger1	finger_index_0_R
+ValveBiped.Bip01_R_Finger11	finger_index_1_R
+ValveBiped.Bip01_R_Finger12	finger_index_2_R
+ValveBiped.Bip01_R_Finger2	finger_middle_0_R
+ValveBiped.Bip01_R_Finger21	finger_middle_1_R
+ValveBiped.Bip01_R_Finger22	finger_middle_2_R
+ValveBiped.Bip01_R_Finger3	finger_ring_0_R
+ValveBiped.Bip01_R_Finger31	finger_ring_1_R
+ValveBiped.Bip01_R_Finger32	finger_ring_2_R
+ValveBiped.Bip01_R_Finger4	finger_pinky_0_R
+ValveBiped.Bip01_R_Finger41	finger_pinky_1_R
+ValveBiped.Bip01_R_Finger42	finger_pinky_2_R
+ValveBiped.Bip01_R_Thigh	leg_upper_R
+ValveBiped.Bip01_R_Calf	leg_lower_R
+ValveBiped.Bip01_R_Foot	ankle_R
+ValveBiped.Bip01_R_Toe0	ball_R
+
+# Helper bones many GMod playermodels carry (procedurally driven in Source 1).
+# CS2's graph does not drive them, so their weights are MERGED into the bone
+# they sit on. The weight script merges automatically when the target already
+# exists. Rigs vary - check what yours has before trusting this list.
+ValveBiped.Bip01_Spine3	spine_2
+ValveBiped.Bip01_L_Trapezius	clavicle_L
+ValveBiped.Bip01_L_Shoulder	arm_upper_L
+ValveBiped.Bip01_L_Bicep	arm_upper_L
+ValveBiped.Bip01_L_Elbow	arm_lower_L
+ValveBiped.Bip01_L_Ulna	arm_lower_L
+ValveBiped.Bip01_L_Wrist	arm_lower_L
+ValveBiped.Bip01_R_Trapezius	clavicle_R
+ValveBiped.Bip01_R_Shoulder	arm_upper_R
+ValveBiped.Bip01_R_Bicep	arm_upper_R
+ValveBiped.Bip01_R_Elbow	arm_lower_R
+ValveBiped.Bip01_R_Ulna	arm_lower_R
+ValveBiped.Bip01_R_Wrist	arm_lower_R

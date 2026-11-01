@@ -6,7 +6,13 @@ labels: ''
 ---
 
 **Which model, and where did it come from?**
-Workshop pack ID / a `.vpk` on disk / loose files.
+Workshop pack ID / a `.vpk` on disk / loose files / converted from another game
+(Garry's Mod, CS:GO... - say which, and how far through PORTING-OTHER-GAMES.md
+you got).
+
+**Versions**
+The first lines of the `Port-Model.ps1` log: the script version and the
+Source2Viewer-CLI version.
 
 **Where did it stop?**
 Extract, materials, port, or compile.

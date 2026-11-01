@@ -7,7 +7,7 @@ param(
     [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
 )
 
-$SCRIPT_VERSION = "1.2.0"
+$SCRIPT_VERSION = "1.3.0"
 
 # Verify a COMPILED .vmdl_c before publishing. Reads only; changes nothing.
 #
@@ -43,6 +43,11 @@ function Invoke-Native {
     } finally { Remove-Item $o, $e -Force -ErrorAction SilentlyContinue }
 }
 
+# display only, but keep it '.'-decimal whatever the Windows region setting
+function Format-Invariant([string]$Format, [object[]]$Values) {
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, $Format, $Values)
+}
+
 $CS   = $CS2Path
 $ADDON = "$CS\game\csgo_addons\$Addon"
 
@@ -76,16 +81,24 @@ foreach ($p in @(@{p=$S2V;n="Source2Viewer-CLI"}, @{p=$ADDON;n="addon output dir
 # Prefer the tidy <name>/<name>.vmdl_c layout, but do not require it - plenty of
 # packs name the file and its folder differently. Fall back to every compiled
 # model, skipping viewmodel arms and anything too small to be a player model.
+# Both together: a pack that is mostly tidy can still hold one model whose
+# folder is named differently, and that model used to go unverified.
 $allC = @(Get-ChildItem $ADDON -Recurse -Filter *.vmdl_c -EA SilentlyContinue)
-$compiled = @($allC | Where-Object { $_.BaseName -eq $_.Directory.Name })
-if (-not $compiled) {
-    $compiled = @($allC | Where-Object {
-        $_.BaseName -notmatch '(_arms?|_pm_arm|viewmodel)$' -and
-        $_.BaseName -notmatch '_arms?_' -and
-        $_.BaseName -notlike 'v_*' -and
-        $_.Length -ge 100000
-    })
-}
+$tidy = @($allC | Where-Object { $_.BaseName -eq $_.Directory.Name })
+$other = @($allC | Where-Object {
+    $_.BaseName -ne $_.Directory.Name -and
+    $_.BaseName -notmatch '(_arms?|_pm_arm|viewmodel)$' -and
+    $_.BaseName -notmatch '_arms?_' -and
+    $_.BaseName -notlike 'v_*' -and
+    $_.Length -ge 100000
+})
+$compiled = @($tidy + $other)
+# In a MIXED addon, a file outside the tidy layout whose skeleton has no body
+# is not a player model and is skipped. An addon with no tidy models at all is
+# checked in full, as before - and a file whose skeleton cannot be read is
+# always checked, so it fails rather than slipping through.
+$untidy = @{}
+if ($tidy.Count) { foreach ($o in $other) { $untidy[$o.FullName] = $true } }
 if (-not $compiled) { Write-Error "no compiled player models under $ADDON"; exit 1 }
 
 # Match by exact folder name first, then by the common _player_model suffix.
@@ -108,11 +121,21 @@ $targets = if ($All) { $compiled }
 Write-Host "Verify-Model $SCRIPT_VERSION`n" -ForegroundColor DarkGray
 $pass = 0; $warn = 0; $fail = 0; $rows = @()
 
+$notBody = @()
 foreach ($t in $targets) {
     $short = $t.BaseName -replace '_player_model$',''
     $f = $t.FullName
 
     $data = Invoke-Native $S2V @("-i", $f, "--block", "DATA")
+    if ($untidy.ContainsKey($f)) {
+        $bn = [regex]::Match($data, 'm_modelSkeleton\s*=\s*\{\s*m_boneName\s*=\s*\[(.*?)\]', 'Singleline')
+        if ($bn.Success) {
+            $low = @([regex]::Matches($bn.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value.ToLower() })
+            if (-not (($low -contains 'pelvis') -and (($low -contains 'leg_upper_l') -or ($low -contains 'leg_upper_r')))) {
+                $notBody += $t.BaseName; continue
+            }
+        }
+    }
     $rerl = Invoke-Native $S2V @("-i", $f, "--block", "RERL")
     $refs = $rerl + $data
     $bad = @(); $wrn = @()
@@ -131,20 +154,24 @@ foreach ($t in $targets) {
     if ($vs -lt 2)  { $bad += "$vs vnmskel reference(s), expected 2" }
 
     # ---- skeleton ----
-    $bones = @(); $hier = @{}; $pelvisPos = $null
+    # Bone names are CASE-SENSITIVE to AnimGraph2 - hand_l does not bind where
+    # hand_L is expected. PowerShell's -contains and hashtables ignore case, so
+    # every comparison below uses the case-sensitive form.
+    $bones = @(); $pelvisPos = $null
+    $hier = New-Object 'System.Collections.Generic.Dictionary[string,string]' ([StringComparer]::Ordinal)
     $mm = [regex]::Match($data, 'm_modelSkeleton\s*=\s*\{\s*m_boneName\s*=\s*\[(.*?)\]', 'Singleline')
     if (-not $mm.Success) { $bad += "no m_modelSkeleton in DATA" }
     else {
-        $bones = [regex]::Matches($mm.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value }
+        $bones = @([regex]::Matches($mm.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value })
         $pm = [regex]::Match($data, 'm_nParent\s*=\s*\[(.*?)\]', 'Singleline')
-        $par = if ($pm.Success) { [regex]::Matches($pm.Groups[1].Value, '-?\d+') | ForEach-Object { [int]$_.Value } } else { @() }
+        $par = @(if ($pm.Success) { [regex]::Matches($pm.Groups[1].Value, '-?\d+') | ForEach-Object { [int]$_.Value } })
         if ($par.Count -eq $bones.Count) {
             for ($i = 0; $i -lt $bones.Count; $i++) {
                 $hier[$bones[$i]] = $(if ($par[$i] -ge 0) { $bones[$par[$i]] } else { '' })
             }
         }
         # pelvis position relative to its parent
-        $pp = [regex]::Match($data, 'm_bonePosParent\s*=\s*\[(.*?)\n\t\t\]', 'Singleline')
+        $pp = [regex]::Match($data, 'm_bonePosParent\s*=\s*\[(.*?)\r?\n[ \t]*\]', 'Singleline')
         if ($pp.Success) {
             $vecs = [regex]::Matches($pp.Groups[1].Value, '\[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]')
             $pi = [array]::IndexOf($bones, 'pelvis')
@@ -154,8 +181,17 @@ foreach ($t in $targets) {
         }
     }
 
-    $missC = @($CRITICAL | Where-Object { $bones -notcontains $_ })
-    $missI = @($IMPORTANT | Where-Object { $bones -notcontains $_ })
+    $exactC = @($CRITICAL  | Where-Object { $bones -ccontains $_ }).Count
+    $exactI = @($IMPORTANT | Where-Object { $bones -ccontains $_ }).Count
+    # Present only in the wrong case (hand_l for hand_L) is its own failure -
+    # report it as exactly that, not as a missing bone.
+    $caseOf = { param($want) @($bones | Where-Object { $_ -eq $want }) | Select-Object -First 1 }
+    $caseC = @($CRITICAL  | Where-Object { $bones -cnotcontains $_ } | ForEach-Object { $g = & $caseOf $_; if ($g) { "$g (needs $_)" } })
+    $caseI = @($IMPORTANT | Where-Object { $bones -cnotcontains $_ } | ForEach-Object { $g = & $caseOf $_; if ($g) { "$g (needs $_)" } })
+    $missC = @($CRITICAL  | Where-Object { $bones -cnotcontains $_ -and -not (& $caseOf $_) })
+    $missI = @($IMPORTANT | Where-Object { $bones -cnotcontains $_ -and -not (& $caseOf $_) })
+    if ($caseC.Count) { $bad += "bone name case does not match the AG2 skeleton, so these will not animate: $($caseC -join ', ')" }
+    if ($caseI.Count) { $wrn += "optional bone name case does not match the AG2 skeleton: $($caseI -join ', ')" }
     if ($missC.Count) {
         # a model missing most of the skeleton is not a player model at all -
         # say that instead of listing twenty bones
@@ -173,10 +209,13 @@ foreach ($t in $targets) {
         # Only meaningful when the expected parent exists. A rig missing spine_0
         # legitimately parents spine_1 to pelvis instead, and that is not an error.
         $mism = @($PARENT.Keys | Where-Object {
-            $bones -contains $_ -and ($bones -contains $PARENT[$_]) -and $hier[$_] -ne $PARENT[$_] })
+            $bones -ccontains $_ -and ($bones -ccontains $PARENT[$_]) -and $hier[$_] -cne $PARENT[$_] })
         if ($mism.Count) { $bad += "wrong parent on: $($mism -join ', ')" }
         $roots = @($bones | Where-Object { $hier[$_] -eq '' })
-        if ($roots -notcontains 'root_motion') { $bad += "root_motion is not a root" }
+        if ($roots -cnotcontains 'root_motion') { $bad += "root_motion is not a root" }
+        # the graph drives root_motion and what hangs off it - nothing else
+        $extraRoots = @($roots | Where-Object { $_ -cne 'root_motion' })
+        if ($extraRoots.Count) { $wrn += "bone(s) outside root_motion, never animated: $($extraRoots -join ', ')" }
     }
 
     # pelvis must sit in root_motion's space: height in Y, not Z
@@ -187,17 +226,17 @@ foreach ($t in $targets) {
             # either way, so this warrants a look rather than a failure - the
             # real failure is pelvis still sitting outside root_motion, checked
             # by the hierarchy test above.
-            $wrn += ("pelvis [{0:F2}, {1:F2}, {2:F2}] - unusual orientation, check it stands upright in Source2Viewer" -f $pelvisPos[0], $pelvisPos[1], $pelvisPos[2])
+            $wrn += (Format-Invariant "pelvis [{0:F2}, {1:F2}, {2:F2}] - unusual orientation, check it stands upright in Source2Viewer" @($pelvisPos[0], $pelvisPos[1], $pelvisPos[2]))
         }
     }
 
-    $fingers = @($bones | Where-Object { $_ -like 'finger_*' }).Count
+    $fingers = @($bones | Where-Object { $_ -clike 'finger_*' }).Count
 
-    $core = $CRITICAL.Count - $missC.Count
+    $core = $exactC
     Write-Host "=== $short ===" -ForegroundColor Cyan
     Write-Host ("  core {0}/{1}   optional {2}/{7}   fingers {3}   bones {4}   refs {5}g/{6}s" -f `
-        $core, $CRITICAL.Count, ($IMPORTANT.Count - $missI.Count), $fingers, $bones.Count, $vg, $vs, $IMPORTANT.Count)
-    if ($pelvisPos) { Write-Host ("  pelvis [{0:F2}, {1:F2}, {2:F2}] (height should be the middle value)" -f $pelvisPos[0],$pelvisPos[1],$pelvisPos[2]) }
+        $core, $CRITICAL.Count, $exactI, $fingers, $bones.Count, $vg, $vs, $IMPORTANT.Count)
+    if ($pelvisPos) { Write-Host (Format-Invariant "  pelvis [{0:F2}, {1:F2}, {2:F2}] (height should be the middle value)" @($pelvisPos[0],$pelvisPos[1],$pelvisPos[2])) }
 
     if ($bad.Count) {
         Write-Host "  [FAIL]" -ForegroundColor Red
@@ -214,6 +253,9 @@ foreach ($t in $targets) {
     $rows += [pscustomobject]@{Model=$short; Result=$res; Core="$core/$($CRITICAL.Count)"; Fingers=$fingers; Note=(($bad + $wrn) -join '; ')}
 }
 
+if ($notBody.Count) {
+    Write-Host "skipped $($notBody.Count) compiled file(s) without a body skeleton: $($notBody -join ', ')`n" -ForegroundColor DarkGray
+}
 Write-Host "`n================================" -ForegroundColor Cyan
 $rows | Format-Table -AutoSize
 Write-Host "PASS $pass   WARN $warn   FAIL $fail"

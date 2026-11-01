@@ -29,4 +29,5 @@ paste here
 
 **Anything unusual about the model?**
 Missing fingers or toes, odd bone names, unusual rig — `Verify-Model.ps1`
-reports all of this.
+reports all of this. If it was re-rigged from another game (Garry's Mod etc.),
+say so — twisted limbs there usually mean the rest pose wasn't matched.

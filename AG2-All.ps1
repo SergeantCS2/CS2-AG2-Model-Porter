@@ -11,9 +11,20 @@ param(
     [switch]$KeepAG1Nodes
 )
 
-$SCRIPT_VERSION = "1.2.0"
+$SCRIPT_VERSION = "1.3.0"
 Write-Host "AG2-All $SCRIPT_VERSION" -ForegroundColor DarkGray
 # ALL-IN-ONE: AG2 port + bodygroup repair + re-parent pelvis + wpnPivot graft
+#
+# Exit codes: 0 done, 1 failed (nothing written by the failing step),
+#             3 not a player model (no pelvis bone) - callers skip it.
+
+# Numbers written into the model MUST use '.' as the decimal separator. The -f
+# operator follows the Windows region setting, so on a German, French, Russian,
+# Brazilian... install it writes "42,123554" - which KV3 reads as two array
+# elements, corrupting every transform it touches. Always format invariantly.
+function Format-Invariant([string]$Format, [object[]]$Values) {
+    return [string]::Format([Globalization.CultureInfo]::InvariantCulture, $Format, $Values)
+}
 
 # Re-parent the pelvis subtree under root_motion.
 #
@@ -26,7 +37,10 @@ Write-Host "AG2-All $SCRIPT_VERSION" -ForegroundColor DarkGray
 # This moves the whole pelvis block to be the first child of root_motion.
 
 if (-not (Test-Path $Path)) { Write-Error "not found: $Path"; exit 1 }
-$L = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path)
+# Source2Viewer writes UTF-8 without a BOM. Windows PowerShell 5.1 would read
+# that as ANSI and the UTF-8 write below would then mangle any non-ASCII text
+# (bodygroup and material names in anime packs, for one). Read it as UTF-8.
+$L = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path -Encoding UTF8)
 
 
 # When pelvis stops being a root and becomes a child of root_motion, its
@@ -129,6 +143,46 @@ function Get-Block([System.Collections.ArrayList]$lines, [int]$nameIdx) {
     return @($s, $e)
 }
 
+# The 'children =' line belonging to the bone whose 'name =' line is $nameIdx,
+# or -1 if the bone is a leaf. Searched only INSIDE that bone's own block: an
+# open-ended scan runs past a leaf bone's closing '},' and finds some later
+# node's children array instead (a BodyGroup's, say) - which then receives the
+# bone that was meant to go under this one.
+function Find-BoneChildren([System.Collections.ArrayList]$lines, [int]$nameIdx) {
+    $ind = $lines[$nameIdx] -replace 'name.*$', ''
+    $blk = Get-Block $lines $nameIdx
+    for ($i = $nameIdx + 1; $i -lt $blk[1]; $i++) {
+        if ($lines[$i].Trim() -eq 'children =' -and ($lines[$i] -replace 'children.*$', '') -eq $ind) { return $i }
+    }
+    return -1
+}
+
+# Insert $block as the first child of the bone whose 'name =' line is $nameIdx,
+# creating its children array if it has none. Returns a note for the log.
+function Add-FirstChild([System.Collections.ArrayList]$lines, [int]$nameIdx, [object[]]$block) {
+    $ind = $lines[$nameIdx] -replace 'name.*$', ''
+    $k = Find-BoneChildren $lines $nameIdx
+    if ($k -ge 0) {
+        $lines.InsertRange($k + 2, $block)
+        return "first child"
+    }
+    $end = (Get-Block $lines $nameIdx)[1]
+    # parentheses matter: in an array literal ',' binds tighter than '+', and
+    # without them "children = " and "[" are glued onto one line
+    $lines.InsertRange($end, (@(("$ind" + "children = "), "$ind[") + $block + @("$ind]")))
+    return "new children array"
+}
+
+# root_motion's own rotation, read from its bone block (identity if absent).
+function Get-BoneAngles([System.Collections.ArrayList]$lines, [int]$nameIdx) {
+    $end = (Get-Block $lines $nameIdx)[1]
+    for ($i = $nameIdx; $i -lt [Math]::Min($nameIdx + 6, $end); $i++) {
+        $mm = [regex]::Match($lines[$i], 'angles = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]')
+        if ($mm.Success) { return @([double]$mm.Groups[1].Value, [double]$mm.Groups[2].Value, [double]$mm.Groups[3].Value) }
+    }
+    return @(0.0, 0.0, 0.0)
+}
+
 $madeRootMotion = $false
 # The pelvis sits at hip height directly above the origin, so the dominant
 # component of its origin is the model's up axis. Checked against every model in
@@ -147,9 +201,19 @@ for ($i = $sk; $i -lt $L.Count; $i++) {
     if ($rm  -lt 0 -and $L[$i] -match 'name = "root_motion"') { $rm  = $i }
     if ($pel -ge 0 -and $rm -ge 0) { break }
 }
-if ($pel -lt 0) { Write-Error "no pelvis bone - is this a player model?"; exit 1 }
+if ($pel -lt 0) { Write-Error "no pelvis bone - is this a player model?"; exit 3 }
 
-for ($i = $pel; $i -lt [Math]::Min($pel + 8, $L.Count); $i++) {
+# Once pelvis sits under root_motion it has already been converted into
+# root_motion's space, where an upright model reads [0, 42, 0] - which looks
+# like +Y-up and used to rotate any stray roots adopted below by 90 degrees.
+# Read the up axis only when pelvis is NOT inside root_motion (a root pelvis,
+# or one under some other root bone, as before).
+$pelUnderRm = $false
+if ($rm -ge 0) {
+    $rmBlk = Get-Block $L $rm
+    $pelUnderRm = ($pel -gt $rmBlk[0] -and $pel -lt $rmBlk[1])
+}
+for ($i = $pel; -not $pelUnderRm -and $i -lt [Math]::Min($pel + 8, $L.Count); $i++) {
     $mo = [regex]::Match($L[$i], 'origin = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]')
     if (-not $mo.Success) { continue }
     $pv = @([double]$mo.Groups[1].Value, [double]$mo.Groups[2].Value, [double]$mo.Groups[3].Value)
@@ -209,8 +273,8 @@ if ($rm -lt 0) {
                         ([double]$mo.Groups[1].Value) ([double]$mo.Groups[2].Value) ([double]$mo.Groups[3].Value) `
                         ([double]$ma.Groups[1].Value) ([double]$ma.Groups[2].Value) ([double]$ma.Groups[3].Value) `
                         0 90 90 $UpAxis
-                $blk[$i]    = [regex]::Replace($blk[$i],    'origin = \[[^\]]*\]', ("origin = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.ox, $c.oy, $c.oz))
-                $blk[$aIdx] = [regex]::Replace($blk[$aIdx], 'angles = \[[^\]]*\]', ("angles = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.p, $c.y, $c.r))
+                $blk[$i]    = [regex]::Replace($blk[$i],    'origin = \[[^\]]*\]', (Format-Invariant "origin = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.ox, $c.oy, $c.oz)))
+                $blk[$aIdx] = [regex]::Replace($blk[$aIdx], 'angles = \[[^\]]*\]', (Format-Invariant "angles = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.p, $c.y, $c.r)))
                 break
             }
         }
@@ -274,9 +338,9 @@ if ($true) {
     if ($oIdx -ge 0 -and $aIdx -ge 0) {
         $c = Convert-ToRootMotionSpace $po[0] $po[1] $po[2] $pa[0] $pa[1] $pa[2] `
                                        $rmAng[0] $rmAng[1] $rmAng[2] $UpAxis
-        $L[$oIdx] = [regex]::Replace($L[$oIdx], 'origin = \[[^\]]*\]', ("origin = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.ox, $c.oy, $c.oz))
-        $L[$aIdx] = [regex]::Replace($L[$aIdx], 'angles = \[[^\]]*\]', ("angles = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.p, $c.y, $c.r))
-        "pelvis transform  -> origin [{0:F4}, {1:F4}, {2:F4}]  angles [{3:F4}, {4:F4}, {5:F4}]" -f $c.ox,$c.oy,$c.oz,$c.p,$c.y,$c.r
+        $L[$oIdx] = [regex]::Replace($L[$oIdx], 'origin = \[[^\]]*\]', (Format-Invariant "origin = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.ox, $c.oy, $c.oz)))
+        $L[$aIdx] = [regex]::Replace($L[$aIdx], 'angles = \[[^\]]*\]', (Format-Invariant "angles = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.p, $c.y, $c.r)))
+        Format-Invariant "pelvis transform  -> origin [{0:F4}, {1:F4}, {2:F4}]  angles [{3:F4}, {4:F4}, {5:F4}]" @($c.ox,$c.oy,$c.oz,$c.p,$c.y,$c.r)
     } else {
         Write-Warning "could not read pelvis origin/angles - transform NOT applied, model may be rotated"
     }
@@ -292,21 +356,11 @@ $rm = -1
 for ($i = $sk; $i -lt $L.Count; $i++) { if ($L[$i] -match 'name = "root_motion"') { $rm = $i; break } }
 if ($rm -lt 0) { Write-Error "lost root_motion after removal"; exit 1 }
 
-$ind = $L[$rm] -replace 'name.*$', ''
-$k = -1
-for ($i = $rm + 1; $i -lt $L.Count; $i++) {
-    if ($L[$i].Trim() -eq 'children =' -and ($L[$i] -replace 'children.*$', '') -eq $ind) { $k = $i; break }
-    if ($L[$i].Trim() -eq '}' -and ($L[$i] -replace '\}.*$', '').Length -lt $ind.Length) { break }
-}
-if ($k -lt 0) {
-    # root_motion is a leaf: give it a children array containing pelvis
-    $rb = Get-Block $L $rm; $re = $rb[1]
-    $ins = @("$ind" + "children = ", "$ind[") + $pelvis + @("$ind]")
-    $L.InsertRange($re, $ins)
-    "root_motion had no children array - created one"
-} else {
-    $L.InsertRange($k + 2, $pelvis)
+# root_motion is a leaf on some rigs: Add-FirstChild gives it a children array
+if ((Add-FirstChild $L $rm $pelvis) -eq "first child") {
     "pelvis grafted as first child of root_motion"
+} else {
+    "root_motion had no children array - created one"
 }
 
 $t = $L -join "`n"
@@ -322,11 +376,22 @@ $part1Wrote = $true
 
 }   # end: needsReparent
 
+# Creating root_motion is a PART 1 edit too, and can happen with no re-parent.
+# Without this the change is made in memory and then thrown away by the reload.
+# Written before the stray-root pass below, which reads the file back.
+if ($madeRootMotion -and -not $part1Wrote) {
+    $t = ($L -join "`n")
+    if ($t.Split('{').Count -ne $t.Split('}').Count) { Write-Error "brace mismatch after creating root_motion"; exit 1 }
+    Copy-Item -LiteralPath $Path "$Path.preparent" -Force -ErrorAction SilentlyContinue
+    Set-Content -LiteralPath $Path -Value $t -NoNewline -Encoding utf8
+    $part1Wrote = $true
+}
+
 # ---- adopt any remaining stray roots -----------------------------------------
 # Canonical skeletons have exactly one root. Helper bones left as siblings of
 # root_motion are never driven by the graph, so bring them in - converting each
 # transform so nothing moves.
-$L2 = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path)
+$L2 = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path -Encoding UTF8)
 $sk2 = -1
 for ($i = 0; $i -lt $L2.Count; $i++) { if ($L2[$i] -match '_class = "Skeleton"') { $sk2 = $i; break } }
 if ($sk2 -ge 0) {
@@ -337,19 +402,22 @@ if ($sk2 -ge 0) {
     }
     if ($kids2 -ge 0) {
         $bi2 = $skInd2 + "`t`t"
-        $strays = @(); $depth = 0; $rmTop = $false
+        $strays = @(); $depth = 0; $rmTop = $false; $rmName2 = -1
         for ($i = $kids2 + 1; $i -lt $L2.Count; $i++) {
             $depth += ([regex]::Matches($L2[$i], '\[|\{')).Count - ([regex]::Matches($L2[$i], '\]|\}')).Count
             if ($depth -le 0) { break }
             if ($L2[$i] -match '_class = "Bone"' -and ($L2[$i] -replace '_class.*$', '') -eq $bi2) {
-                $nm = $null
+                $nm = $null; $nmIdx = -1
                 for ($j = $i + 1; $j -lt [Math]::Min($i + 4, $L2.Count); $j++) {
-                    $mm = [regex]::Match($L2[$j], '^\s*name = "([^"]+)"'); if ($mm.Success) { $nm = $mm.Groups[1].Value; break }
+                    $mm = [regex]::Match($L2[$j], '^\s*name = "([^"]+)"'); if ($mm.Success) { $nm = $mm.Groups[1].Value; $nmIdx = $j; break }
                 }
-                if ($nm -eq 'root_motion') { $rmTop = $true } elseif ($nm) { $strays += @{ Idx=$i; Name=$nm } }
+                if ($nm -eq 'root_motion') { $rmTop = $true; $rmName2 = $nmIdx } elseif ($nm) { $strays += @{ Idx=$i; Name=$nm } }
             }
         }
         if ($rmTop -and $strays.Count) {
+            # Convert into root_motion's ACTUAL rotation, the same as pelvis
+            # above - packs in the wild are not all at exactly [0, 90, 90].
+            $rmAng2 = Get-BoneAngles $L2 $rmName2
             $moved = @()
             foreach ($st in ($strays | Sort-Object { $_.Idx } -Descending)) {
                 $b = Get-Block $L2 $st.Idx
@@ -366,49 +434,36 @@ if ($sk2 -ge 0) {
                     $c = Convert-ToRootMotionSpace `
                             ([double]$mo.Groups[1].Value) ([double]$mo.Groups[2].Value) ([double]$mo.Groups[3].Value) `
                             ([double]$ma.Groups[1].Value) ([double]$ma.Groups[2].Value) ([double]$ma.Groups[3].Value) `
-                            0 90 90 $UpAxis
-                    $blk[$i]    = [regex]::Replace($blk[$i],    'origin = \[[^\]]*\]', ("origin = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.ox,$c.oy,$c.oz))
-                    $blk[$aIdx] = [regex]::Replace($blk[$aIdx], 'angles = \[[^\]]*\]', ("angles = [ {0:F6}, {1:F6}, {2:F6} ]" -f $c.p,$c.y,$c.r))
+                            $rmAng2[0] $rmAng2[1] $rmAng2[2] $UpAxis
+                    $blk[$i]    = [regex]::Replace($blk[$i],    'origin = \[[^\]]*\]', (Format-Invariant "origin = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.ox, $c.oy, $c.oz)))
+                    $blk[$aIdx] = [regex]::Replace($blk[$aIdx], 'angles = \[[^\]]*\]', (Format-Invariant "angles = [ {0:F6}, {1:F6}, {2:F6} ]" @($c.p, $c.y, $c.r)))
                     break
                 }
                 $moved = $blk + $moved
                 $L2.RemoveRange($b[0], $b[1] - $b[0] + 1)
             }
-            $rmi = -1
-            for ($i = 0; $i -lt $L2.Count; $i++) {
-                if ($L2[$i] -match '_class = "Bone"') {
-                    for ($j = $i + 1; $j -lt [Math]::Min($i + 4, $L2.Count); $j++) {
-                        if ($L2[$j] -match '^\s*name = "root_motion"') { $rmi = $i; break }
+            $rmn = -1
+            for ($i = 1; $i -lt $L2.Count; $i++) {
+                if ($L2[$i] -match '^\s*name = "root_motion"\s*$') {
+                    for ($j = $i - 1; $j -ge [Math]::Max(0, $i - 3); $j--) {
+                        if ($L2[$j] -match '_class = "Bone"') { $rmn = $i; break }
                     }
                 }
-                if ($rmi -ge 0) { break }
+                if ($rmn -ge 0) { break }
             }
-            if ($rmi -ge 0) {
-                $rInd = ($L2[$rmi] -replace '_class.*$', '')
-                $rk = -1
-                for ($i = $rmi + 1; $i -lt $L2.Count; $i++) {
-                    if ($L2[$i].Trim() -eq 'children =' -and ($L2[$i] -replace 'children.*$', '') -eq $rInd) { $rk = $i; break }
-                }
-                if ($rk -ge 0) {
-                    $L2.InsertRange($rk + 2, $moved)
-                    $t3 = ($L2 -join "`n")
-                    if ($t3.Split('{').Count -eq $t3.Split('}').Count) {
-                        Set-Content -LiteralPath $Path -Value $t3 -NoNewline -Encoding utf8
-                        "adopted $($strays.Count) stray root(s) under root_motion: $(($strays | ForEach-Object { $_.Name }) -join ', ')"
-                    }
+            if ($rmn -ge 0) {
+                # bounded to root_motion's own block, creating its array if needed
+                $null = Add-FirstChild $L2 $rmn $moved
+                $t3 = ($L2 -join "`n")
+                if ($t3.Split('{').Count -eq $t3.Split('}').Count -and $t3.Split('[').Count -eq $t3.Split(']').Count) {
+                    Set-Content -LiteralPath $Path -Value $t3 -NoNewline -Encoding utf8
+                    "adopted $($strays.Count) stray root(s) under root_motion: $(($strays | ForEach-Object { $_.Name }) -join ', ')"
+                } else {
+                    Write-Warning "stray roots NOT adopted - brace check failed"
                 }
             }
         }
     }
-}
-
-# Creating root_motion is a PART 1 edit too, and can happen with no re-parent.
-# Without this the change is made in memory and then thrown away by the reload.
-if ($madeRootMotion -and -not $part1Wrote) {
-    $t = ($L -join "`n")
-    if ($t.Split('{').Count -ne $t.Split('}').Count) { Write-Error "brace mismatch after creating root_motion"; exit 1 }
-    Copy-Item -LiteralPath $Path "$Path.preparent" -Force -ErrorAction SilentlyContinue
-    Set-Content -LiteralPath $Path -Value $t -NoNewline -Encoding utf8
 }
 
 # ---- reload after re-parent, then apply the AG2 edits ----
@@ -419,13 +474,12 @@ if ($madeRootMotion -and -not $part1Wrote) {
 
 if (-not (Test-Path $Path)) { Write-Error "not found: $Path"; exit 1 }
 
-$L = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path)
+$L = [System.Collections.ArrayList]@(Get-Content -LiteralPath $Path -Encoding UTF8)
 $log = @()
 
 # A model may already carry AG2 nodes (e.g. recompiled post-AG2 from old source)
-# while still needing the case flip, Feet fix or bone graft. Skip only the node
-# insertion, not the whole script.
-$hasAG2 = ($L -join "`n") -match 'AnimGraph2List' 
+# while still needing the case flip, Feet fix or bone graft. Step 3+4 checks
+# each list itself and only adds what is missing; nothing else is skipped.
 
 
 # --- 0. case-flip side suffixes if this model predates the uppercase convention ---
@@ -449,7 +503,8 @@ if ($lower -gt 0) {
         $c = $n -replace '_twist1$','_TWIST1' -replace '_twist$','_TWIST' `
                 -replace '_l$','_L' -replace '_r$','_R' `
                 -replace '_l(?=_TWIST)','_L' -replace '_r(?=_TWIST)','_R'
-        if ($c -cne $n -and $CANON -contains $c) {
+        # -ccontains: the comparison has to be case-sensitive, it is the whole point
+        if ($c -cne $n -and $CANON -ccontains $c) {
             $L[$i] = $L[$i] -replace ('name = "' + [regex]::Escape($n) + '"'), ('name = "' + $c + '"')
             $pairs += [pscustomobject]@{ Old = $n; New = $c }
             $flipped++
@@ -463,9 +518,27 @@ if ($lower -gt 0) {
         # "Invalid skinning bone index :: -1" for every joint. The flip is
         # length-preserving, so patch the DMX string table in place.
         $enc = [System.Text.Encoding]::GetEncoding(28591)   # Latin1, byte-preserving
+        #
+        # Only the DMX files THIS model references are patched. Packs that keep
+        # several models in one folder would otherwise have their neighbours'
+        # meshes renamed too. If no reference resolves (an unfamiliar layout),
+        # fall back to every DMX beside the model, as before.
         $dmxDir = Split-Path -Parent $Path
+        $dmxFiles = @()
+        $dmxRefs = @([regex]::Matches(($L -join "`n"), 'filename = "([^"]+\.dmx)"', 'IgnoreCase') |
+                     ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+        foreach ($ref in $dmxRefs) {
+            # references are relative to the addon root - walk up until one resolves
+            $up = $dmxDir
+            for ($u = 0; $u -lt 12 -and $up; $u++) {
+                $cand = Join-Path $up $ref
+                if (Test-Path -LiteralPath $cand) { $dmxFiles += Get-Item -LiteralPath $cand; break }
+                $up = Split-Path $up -Parent
+            }
+        }
+        if (-not $dmxFiles.Count) { $dmxFiles = @(Get-ChildItem "$dmxDir\*.dmx" -ErrorAction SilentlyContinue) }
         $patched = 0
-        foreach ($dmx in (Get-ChildItem "$dmxDir\*.dmx" -ErrorAction SilentlyContinue)) {
+        foreach ($dmx in $dmxFiles) {
             $bytes = [IO.File]::ReadAllBytes($dmx.FullName)
             $txt = $enc.GetString($bytes)
             $before = $txt
@@ -560,12 +633,59 @@ for ($i = $L.Count - 1; $i -ge 0; $i--) {
 # --- 3+4. insert the AG2 node lists before the Skeleton node ---
 # A model may already carry these - a partially-ported model, or one
 # recompiled from post-AG2 sources. Inserting a second set duplicates the
-# references and the compile output is wrong. Check first.
-if ($hasAG2) {
-    # The lists exist, but a half-ported model can be missing individual
-    # entries - one seen in the wild had NmSkeletonList with only the viewmodel
-    # skeleton, so the worldmodel graph had nothing to animate against. Top up
-    # whatever is absent instead of skipping the step wholesale.
+# references and the compile output is wrong. Check first, and check EACH list:
+# a model can carry one list without the other.
+function Get-AG2ListBlock([string]$ind, [string]$which) {
+    if ($which -eq 'skeleton') {
+        $blk = @("$ind{", "$ind`t_class = `"NmSkeletonList`"", "$ind`tchildren = ", "$ind`t[")
+        foreach ($s in @('worldmodel','viewmodel')) {
+            $blk += @("$ind`t`t{", "$ind`t`t`t_class = `"NmSkeletonReference`"",
+                      "$ind`t`t`tfilename = `"animation/skeletons/characters/$s.vnmskel`"", "$ind`t`t},")
+        }
+        return ($blk + @("$ind`t]", "$ind},"))
+    }
+    $graphs = @(
+      @('DefaultAnimGraph2', $null,         'animation/graphs/worldmodel/worldmodel.vnmgraph'),
+      @('AnimGraph2',        'uimodel',     'animation/graphs/ui/uimodel.vnmgraph'),
+      @('AnimGraph2',        'hudmodel',    'animation/graphs/viewmodel/viewmodel.vnmgraph'),
+      @('AnimGraph2',        'worldmodel',  'animation/graphs/worldmodel/worldmodel.vnmgraph')
+    )
+    $blk = @("$ind{", "$ind`t_class = `"AnimGraph2List`"", "$ind`tchildren = ", "$ind`t[")
+    foreach ($g in $graphs) {
+        $blk += "$ind`t`t{"
+        $blk += "$ind`t`t`t_class = `"$($g[0])`""
+        if ($g[1]) { $blk += "$ind`t`t`tname = `"$($g[1])`"" }
+        $blk += "$ind`t`t`tfilename = `"$($g[2])`""
+        $blk += "$ind`t`t},"
+    }
+    return ($blk + @("$ind`t]", "$ind},"))
+}
+
+$sk = -1
+for ($i = 0; $i -lt $L.Count; $i++) { if ($L[$i] -match '_class = "Skeleton"') { $sk = $i; break } }
+if ($sk -lt 0) { Write-Error "no Skeleton node"; exit 1 }
+$open = $sk - 1
+while ($open -ge 0 -and $L[$open].Trim() -ne '{') { $open-- }
+$ind = $L[$open] -replace '\{.*$', ''
+$joinedNow    = $L -join "`n"
+$hasSkelList  = $joinedNow -match '_class = "NmSkeletonList"'
+$hasGraphList = $joinedNow -match '_class = "AnimGraph2List"'
+
+if (-not $hasSkelList -and -not $hasGraphList) {
+    $L.InsertRange($open, (Get-AG2ListBlock $ind 'skeleton') + (Get-AG2ListBlock $ind 'graph'))
+    $log += "inserted NmSkeletonList + AnimGraph2List"
+} else {
+    # Half-ported. First add a list that is missing outright - one model with
+    # a graph list but no skeleton list would otherwise get no skeleton
+    # references at all, and the reverse used to get a duplicate skeleton list.
+    $newLists = @()
+    if (-not $hasSkelList)  { $newLists += Get-AG2ListBlock $ind 'skeleton'; $log += "added the missing NmSkeletonList" }
+    if (-not $hasGraphList) { $newLists += Get-AG2ListBlock $ind 'graph';    $log += "added the missing AnimGraph2List" }
+    if ($newLists.Count) { $L.InsertRange($open, $newLists) }
+
+    # Then top up individual entries - one seen in the wild had NmSkeletonList
+    # with only the viewmodel skeleton, so the worldmodel graph had nothing to
+    # animate against.
     $want = @(
         @{ List='NmSkeletonList'; Class='NmSkeletonReference'; Name=$null; File='animation/skeletons/characters/worldmodel.vnmskel' },
         @{ List='NmSkeletonList'; Class='NmSkeletonReference'; Name=$null; File='animation/skeletons/characters/viewmodel.vnmskel' },
@@ -586,7 +706,10 @@ if ($hasAG2) {
         for ($i = $li + 1; $i -lt [Math]::Min($li + 6, $L.Count); $i++) {
             if ($L[$i].Trim() -eq 'children =' -and ($L[$i] -replace 'children.*$', '') -eq $lInd) { $lk = $i; break }
         }
-        if ($lk -lt 0) { continue }
+        if ($lk -lt 0) {
+            $log += "WARNING: $($w.List) has no expandable children array - $($w.File) NOT added"
+            continue
+        }
         $ei = $lInd + "`t"
         $entry = @("$ei{", "$ei`t_class = `"$($w.Class)`"")
         if ($w.Name) { $entry += "$ei`tname = `"$($w.Name)`"" }
@@ -595,36 +718,7 @@ if ($hasAG2) {
         $added++
     }
     if ($added) { $log += "AnimGraph2 lists already present - added $added missing entry(s)" }
-    else        { $log += "AnimGraph2List already present and complete" }
-} else {
-    $sk = -1
-    for ($i = 0; $i -lt $L.Count; $i++) { if ($L[$i] -match '_class = "Skeleton"') { $sk = $i; break } }
-    if ($sk -lt 0) { Write-Error "no Skeleton node"; exit 1 }
-    $open = $sk - 1
-    while ($open -ge 0 -and $L[$open].Trim() -ne '{') { $open-- }
-    $ind = $L[$open] -replace '\{.*$', ''
-
-    $graphs = @(
-      @('DefaultAnimGraph2', $null,         'animation/graphs/worldmodel/worldmodel.vnmgraph'),
-      @('AnimGraph2',        'uimodel',     'animation/graphs/ui/uimodel.vnmgraph'),
-      @('AnimGraph2',        'hudmodel',    'animation/graphs/viewmodel/viewmodel.vnmgraph'),
-      @('AnimGraph2',        'worldmodel',  'animation/graphs/worldmodel/worldmodel.vnmgraph')
-    )
-    $blk = @("$ind{", "$ind`t_class = `"NmSkeletonList`"", "$ind`tchildren = ", "$ind`t[")
-    foreach ($s in @('worldmodel','viewmodel')) {
-        $blk += @("$ind`t`t{", "$ind`t`t`t_class = `"NmSkeletonReference`"",
-                  "$ind`t`t`tfilename = `"animation/skeletons/characters/$s.vnmskel`"", "$ind`t`t},")
-    }
-    $blk += @("$ind`t]", "$ind},", "$ind{", "$ind`t_class = `"AnimGraph2List`"", "$ind`tchildren = ", "$ind`t[")
-    foreach ($g in $graphs) {
-        $blk += "$ind`t`t{"
-        $blk += "$ind`t`t`t_class = `"$($g[0])`""
-        if ($g[1]) { $blk += "$ind`t`t`tname = `"$($g[1])`"" }
-        $blk += "$ind`t`t`tfilename = `"$($g[2])`""
-        $blk += "$ind`t`t},"
-    }
-    $blk += @("$ind`t]", "$ind},")
-    $L.InsertRange($open, $blk); $log += "inserted NmSkeletonList + AnimGraph2List"
+    elseif (-not $newLists.Count) { $log += "AnimGraph2List already present and complete" }
 }
 
 # --- 5. graft wpnPivot -> wpn under root_motion ---

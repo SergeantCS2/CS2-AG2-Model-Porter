@@ -8,10 +8,16 @@ param(
     [string]$Source = "",
     [switch]$Force,   # re-download the CLI even if present
     # CS2 lives elsewhere if your Steam library is on another drive
-    [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
+    [string]$CS2Path = "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive",
+    # Source2Viewer release to install, e.g. "20.1". Empty = the newest. Only
+    # needed if a new release changes its output and porting breaks - pin the
+    # last one that worked and re-run with -Force.
+    [string]$S2VVersion = "",
+    # where Source2Viewer-CLI lives; Port-Model and Verify look here by default
+    [string]$S2VDir = "$env:USERPROFILE\s2v"
 )
 
-$SCRIPT_VERSION = "1.2.0"
+$SCRIPT_VERSION = "1.3.0"
 Write-Host "Setup-AG2 $SCRIPT_VERSION" -ForegroundColor DarkGray
 
 # One-time setup. Idempotent - safe to re-run.
@@ -28,7 +34,7 @@ $ErrorActionPreference = "Stop"
 $CS   = $CS2Path
 $GI   = "$CS\game\csgo\gameinfo.gi"
 $RC   = "$CS\game\bin\win64\resourcecompiler.exe"
-$S2V  = "$env:USERPROFILE\s2v"
+$S2V  = $S2VDir
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 $fail = 0
 
@@ -55,24 +61,37 @@ if (Test-Path $RC) {
 }
 
 # --- 2. gameinfo.gi ---
+# The file is edited as raw text: same line endings, same encoding, one line
+# added. That way Cleanup can take exactly that line out again and leave the
+# file byte-for-byte as CS2 shipped it.
 if (Test-Path $GI) {
-    $hasChar = (Select-String -Path $GI -Pattern '"include"\s+"characters"' -EA SilentlyContinue).Count
-    if ($hasChar -gt 0) {
+    $GI = (Resolve-Path -LiteralPath $GI).ProviderPath     # .NET calls below need a real path
+    $giBytes = [IO.File]::ReadAllBytes($GI)
+    $giBom   = ($giBytes.Length -ge 3 -and $giBytes[0] -eq 0xEF -and $giBytes[1] -eq 0xBB -and $giBytes[2] -eq 0xBF)
+    $giText  = [IO.File]::ReadAllText($GI)
+    if ($giText -match '"include"\s+"characters"') {
         Say $true "gameinfo.gi already has the 'characters' include"
     } else {
-        if (-not (Test-Path "$GI.bak")) { Copy-Item $GI "$GI.bak" }
-        $lines = Get-Content $GI
+        $nl    = if ($giText.Contains("`r`n")) { "`r`n" } else { "`n" }
+        $lines = [regex]::Split($giText, '\r?\n')
         $idx = -1
         for ($i = 0; $i -lt $lines.Count; $i++) {
             if ($lines[$i] -match '"include"\s+"maps"\s*$') { $idx = $i; break }
         }
         if ($idx -lt 0) {
-            Say $false "could not find the VpkDirectories block - add manually, see QUICKSTART"
+            Say $false "could not find the VpkDirectories block in gameinfo.gi"
+            Write-Host "         Add this line by hand, inside VpkDirectories, below `"include`" `"maps`":" -ForegroundColor Yellow
+            Write-Host "             `"include`"       `"characters`"" -ForegroundColor Yellow
+            Write-Host "         (close CS2 first; Cleanup-AG2.ps1 removes it again)" -ForegroundColor DarkYellow
         } else {
             $ind = ($lines[$idx] -replace '"include".*$', '')
-            $new = @($lines[0..$idx]) + @("$ind`"include`"       `"characters`"") + @($lines[($idx+1)..($lines.Count-1)])
+            $new = @($lines[0..$idx]) + @("$ind`"include`"       `"characters`"")
+            if ($idx + 1 -le $lines.Count - 1) { $new += @($lines[($idx+1)..($lines.Count-1)]) }
             try {
-                Set-Content $GI -Value $new -ErrorAction Stop
+                # Back up what is there NOW. A backup kept from an older CS2
+                # build would roll gameinfo.gi back to that build on cleanup.
+                [IO.File]::WriteAllBytes("$GI.bak", $giBytes)
+                [IO.File]::WriteAllText($GI, ($new -join $nl), (New-Object Text.UTF8Encoding($giBom)))
                 Say $true "gameinfo.gi patched (backup at gameinfo.gi.bak)"
             } catch {
                 Say $false "gameinfo.gi is LOCKED - close CS2 and the Workshop Tools, then re-run"
@@ -88,9 +107,13 @@ if ((Test-Path $exe) -and -not $Force) {
 } else {
     try {
         New-Item -ItemType Directory -Force -Path $S2V | Out-Null
-        $url = "https://github.com/ValveResourceFormat/ValveResourceFormat/releases/latest/download/cli-windows-x64.zip"
+        $url = if ($S2VVersion) {
+                   "https://github.com/ValveResourceFormat/ValveResourceFormat/releases/download/$S2VVersion/cli-windows-x64.zip"
+               } else {
+                   "https://github.com/ValveResourceFormat/ValveResourceFormat/releases/latest/download/cli-windows-x64.zip"
+               }
         $zip = "$env:TEMP\s2v-cli.zip"
-        Write-Host "  ...  downloading Source2Viewer-CLI" -ForegroundColor DarkGray
+        Write-Host "  ...  downloading Source2Viewer-CLI $(if ($S2VVersion) { $S2VVersion } else { '(newest release)' })" -ForegroundColor DarkGray
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
         Invoke-WebRequest -Uri $url -OutFile $zip -UseBasicParsing
         Expand-Archive $zip -DestinationPath $S2V -Force
@@ -110,6 +133,16 @@ if ((Test-Path $exe) -and -not $Force) {
     }
 }
 
+# Which release is installed? Its output format is what the porting relies on,
+# so it is worth having in the log when something changes.
+if (Test-Path $exe) {
+    try {
+        $verOut = & $exe --version 2>&1 | Out-String
+        $ver = ($verOut -split "`n" | Where-Object { $_ -match '\d+\.\d+' } | Select-Object -First 1)
+        if ($ver) { Write-Host "         version: $($ver.Trim())" -ForegroundColor DarkGray }
+    } catch {}
+}
+
 # --- 4. addon folders ---
 foreach ($d in @("$CS\content\csgo_addons\$Addon", "$CS\game\csgo_addons\$Addon")) {
     if (-not (Test-Path $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null }
@@ -124,7 +157,9 @@ Write-Host "         if the Workshop Manager does not list it, use" -ForegroundC
 Write-Host "         Workshop Tools -> Create New Addon -> $Addon" -ForegroundColor DarkGray
 
 # --- 5. unblock the scripts ---
-Get-ChildItem "$here\*.ps1" | Unblock-File
+if ($env:OS -eq 'Windows_NT') {        # downloaded-file marks are a Windows thing
+    Get-ChildItem "$here\*.ps1" | Unblock-File
+}
 Say $true "scripts unblocked in $here"
 
 # --- 6. is the source actually available? ---
@@ -138,7 +173,13 @@ if ($Vpk) {
 } else {
     # Large packs are split into <id>_dir.vpk plus <id>_000.vpk, _001.vpk and so
     # on - there is no plain <id>.vpk. Look for any .vpk in the folder.
-    $packDir = "C:\Program Files (x86)\Steam\steamapps\workshop\content\730\$Pack"
+    # Workshop content lands in the same Steam library as CS2 itself
+    # (a CS2 folder only one level deep, like D:\CS2, has no library above it)
+    $steamapps = ''
+    try { $steamapps = Split-Path (Split-Path $CS.TrimEnd('\', '/') -Parent) -Parent } catch {}
+    $defDir  = "C:\Program Files (x86)\Steam\steamapps\workshop\content\730\$Pack"
+    $packDir = if ($steamapps) { Join-Path $steamapps "workshop\content\730\$Pack" } else { $defDir }
+    if (-not (Test-Path $packDir) -and (Test-Path $defDir)) { $packDir = $defDir }
     $packVpk = Get-ChildItem $packDir -Filter *.vpk -EA SilentlyContinue |
                Sort-Object { $_.Name -notlike "*_dir.vpk" } | Select-Object -First 1
     if ($packVpk) {

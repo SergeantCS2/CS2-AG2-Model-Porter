@@ -3,7 +3,10 @@
 **Experimental. The Windows version is the one that's known to work.**
 
 Fixes custom CS2 player models that T-pose after the AnimGraph2 update. This is
-a rewrite of the Windows pipeline in Python and bash.
+a rewrite of the Windows pipeline in Python and bash. The part that matters
+most — the edits made to each model — is kept identical to the Windows
+version's and tested against it; the pipeline around it does less (see
+[What's different from Windows](#whats-different-from-windows)).
 
 If you have access to a Windows machine, use the Windows package instead —
 it's tested, and it can publish to the Workshop, which this cannot.
@@ -47,9 +50,10 @@ chmod +x start.sh ag2port.py
 > on Linux yet.
 >
 > Everything *else* — extraction, the model edits, materials, verification —
-> runs natively and is verified to produce output identical to Windows.
+> runs natively. The model edits produce the same `.vmdl` as Windows; that is
+> checked by the test suite on every change.
 
-**So there are two ways to use this**, and the second one always works.
+**So there are two ways to use this.** The second is the dependable one.
 
 ---
 
@@ -81,8 +85,8 @@ If it passes, everything works locally:
 
 ## Path B — port on Linux, compile on Windows
 
-Guaranteed to work. All the interesting work happens on Linux; Windows just
-runs the compiler.
+The dependable route. All the interesting work happens on Linux; Windows just
+runs the compiler. The test suite runs this exact hand-off on every change.
 
 **On Linux:**
 
@@ -101,11 +105,13 @@ under:
 the same path. Then there:
 
 ```powershell
-.\Port-Model.ps1 -CompileOnly
+.\Port-Model.ps1 -CompileOnly -Addon <addon>
+.\Verify-Model.ps1 -All -Addon <addon>
 ```
 
-That only compiles what you prepared. It doesn't re-port anything and doesn't
-need the original pack on that machine.
+That only compiles what you prepared — every model that has been ported — and
+leaves anything else in the folder alone. It doesn't re-port anything and
+doesn't need the original pack on that machine.
 
 Publishing has to happen there too — the Workshop Manager is GUI-only.
 
@@ -242,19 +248,35 @@ Player models are usually 200 KB and up.
 
 ## Is the output the same as Windows?
 
-Yes, and this part *is* verified. The same model through both implementations:
+For the model edits, yes, and that is tested rather than claimed. The
+Windows test suite (`tests/Run-Tests.ps1`) runs this script's edits and
+Windows' `AG2-All.ps1` on the same set of synthetic models — ordinary ones,
+lowercase-boned, missing `root_motion`, authored lying down, half-ported, and
+more — and fails unless the resulting `.vmdl` files match. It also runs the
+whole Path B hand-off end to end.
 
-```
-pelvis_origin     linux=-0.000000, 42.123554, 0.458082    windows=same
-pelvis_angles     linux=0.000000, 90.000000, 86.490982    windows=same
-wpn_origin        linux=0.0, -58.781662, 3.471689         windows=same
-counts            vanmgrph=0 vnmgraph=4 wpnPivot=1 vnmskel=2
-```
+The *compile* is the unverified part, and nothing here has been loaded in
+game from a Linux run yet.
 
-Identical on every checked property, pelvis transform matching to six decimal
-places. Two independent implementations agreeing is a decent check on both.
+## What's different from Windows
 
-The *compile* is the unverified part, not the porting.
+The pipeline around the model edits is smaller:
+
+| | Linux | Windows |
+|---|---|---|
+| model edits | same | same |
+| packs in the `<name>/<name>.vmdl_c` layout | yes | yes |
+| odd-layout models in a mixed pack | left out | found by their skeleton |
+| several models sharing one folder | each re-extracts the folder | staged, so ported ones are kept |
+| materials beside or under the model | yes | yes |
+| materials kept elsewhere (Valve's agent layout) | not fetched | fetched from the pack |
+| a material the pack lacks | nothing — the compile complains | placeholder, with a warning |
+| Verify | same checks | same checks |
+| compiling | Wine / Proton, untested | resourcecompiler |
+| publishing | no | Workshop Manager |
+
+If a pack hits one of the rows where Linux does less, port that pack on
+Windows.
 
 ---
 
@@ -278,3 +300,5 @@ See [`NOTES.md`](NOTES.md) — the technical writeup, shared with the Windows
 package.
 For publishing and server setup, see the Windows package's README — that side
 of the process is the same, and the Workshop Manager only exists there.
+Models from other games (Garry's Mod and so on) need the Windows tools too —
+see PORTING-OTHER-GAMES.md in the Windows package.

@@ -1,5 +1,100 @@
 # Changelog
 
+## v1.3.0
+
+Fixes from a full audit plus a new test suite, and a route for models from
+other games. On the packs this was built against, ported output is
+byte-identical to 1.2.0 — the test suite pins it.
+
+**FIXED:** on a Windows set to a language that writes decimals with a comma
+(German, French, Spanish, Portuguese, Russian, Polish and many more), every
+converted bone transform was written as `[ 0,000000, 42,123554, 0,458082 ]`,
+which the model format reads as six numbers instead of three. Rebuilt materials
+had the same problem with colour vectors. Numbers are now always written with
+`.`. **If you ported on such a system, re-port with `-Force`.**
+
+**FIXED:** Workshop packs were only looked for in the `C:` Steam library, so
+with CS2 on any other drive Setup reported the pack missing and porting failed
+with "source VPK not found", even with `-CS2Path`. The pack is now found in the
+library CS2 is installed in. The wizard also finds Steam itself when it isn't on
+`C:`.
+
+**FIXED:** a model whose `root_motion` bone had no children had its pelvis
+grafted into the next node that did — a bodygroup — while the log said it went
+under `root_motion`. The search now stays inside `root_motion`'s own block.
+
+**FIXED:** `Verify-Model.ps1` compared bone names case-insensitively, so a model
+with `hand_l` passed as though it had `hand_L` — exactly the difference AG2
+binds on. Bone checks are now case-sensitive, a case-only mismatch is reported
+by name, and bones left outside `root_motion` are flagged.
+
+**FIXED:** in a pack where most models use `<name>/<name>.vmdl_c`, models laid
+out differently were silently left out of porting, `-CompileOnly` and Verify.
+They're now included when their skeleton shows they're player models; props and
+other files stay out.
+
+**FIXED:** materials in Workshop and `.vpk` packs were only looked for in a
+folder called `materials`, so packs using `mat/`, nested folders or materials
+beside the model failed with "could not rebuild any materials". The model's own
+resource list is now used in every mode. Materials are also rebuilt one at a
+time, so a pack where Source2Viewer could decompile *some* materials no longer
+ends up with placeholders for the rest.
+
+**FIXED:** materials a model borrows from CS2 itself were copied — or, failing
+that, stubbed with a placeholder — into the addon at CS2's own path, where a
+mounted addon can stand in for the game's file. They're now left to the game.
+
+**FIXED:** `Cleanup-AG2.ps1` restored `gameinfo.gi` from a backup that could be
+from an older CS2 build, rolling the file back. Setup now edits only the one
+line and backs up the current file each time; Cleanup restores the backup only
+if it still matches, and otherwise removes just the added line.
+
+**FIXED:** smaller things the test suite turned up — a model with a graph list
+but no skeleton list got no skeleton references, and the reverse got a second
+skeleton list; the case flip patched other models' `.dmx` files in a shared
+folder; stray roots were turned 90° on models whose pelvis was already
+parented, and converted with an assumed rather than the actual `root_motion`
+angle; non-ASCII text (bodygroup names in anime packs) was garbled by Windows
+PowerShell; viewmodel arms in a pack were reported as failures rather than
+skipped; a compile that reported no error but wrote no file was counted as a
+success; in a pack keeping several models in one folder, porting one model
+re-extracted the folder over the others' already-ported sources, so a later
+`-CompileOnly` could build them T-posing; a CS2 path typed into the wizard with
+a trailing `\` garbled the arguments of every script it ran.
+
+**FIXED:** `-CompileOnly` compiled every `<name>/<name>.vmdl` left in the
+addon, ported or not, so viewmodel arms extracted alongside a model were
+compiled too and then failed Verify. It now compiles every ported model
+(wherever it sits) and lists the rest without touching them.
+
+**CHANGED:** the experimental Linux port's model edits now match the Windows
+version's — the test suite runs both on the same models and requires the same
+`.vmdl` — including everything since 1.0.0 it was missing: any `root_motion`
+angle, creating `root_motion`, adopting stray roots, the up-axis correction,
+the weapon attachments and the fixes above. Its loose-file paths, material
+handling, Verify and `gameinfo.gi` handling are fixed too. It is still
+experimental and does less than Windows around the edits;
+[linux/README.md](linux/README.md) now says exactly what.
+
+**ADDED:** [PORTING-OTHER-GAMES.md](PORTING-OTHER-GAMES.md) — what it takes to
+bring Garry's Mod, SFM, HL2, TF2, CS:GO and other Source games' models to CS2,
+step by step, with `valvebiped_to_cs2.txt` (the full ValveBiped → CS2 bone map)
+and `tools\blender_remap_weights.py` for the re-rig. Menu option 9 in the wizard
+summarises it.
+
+**ADDED:** `tests\Run-Tests.ps1` — runs every script against synthetic models
+and stand-ins for Source2Viewer and `resourcecompiler`; no game files needed.
+Runs in GitHub Actions on Windows PowerShell 5.1.
+
+**ADDED:** release packaging. Pushing a version tag builds both downloads
+from a fixed file list and attaches them to a draft release, after checking
+the tag against every script's version and the CHANGELOG.
+
+**ADDED:** the Source2Viewer version is printed in every port log, and
+`Setup-AG2.ps1 -S2VVersion <release>` installs a specific release if a new one
+ever breaks porting.
+
+
 ## v1.2.0
 
 **ADDED:** weapon attachments are matched to Valve's own agents. Community

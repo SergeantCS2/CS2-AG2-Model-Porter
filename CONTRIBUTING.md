@@ -8,7 +8,9 @@
 ## Before opening an issue
 
 Include the log. `Port-Model.ps1` writes a full transcript to `logs\` plus a
-per-model compiler log — those two answer most questions immediately.
+per-model compiler log — those two answer most questions immediately. The
+transcript's first lines give the script and Source2Viewer versions; include
+them.
 
 State whether the model **compiled**, **verified**, and **mounted**, in that
 order. Most reports that look like "the port failed" turn out to be the addon
@@ -28,6 +30,13 @@ are a separate port this tool does not attempt. AG2 decouples arms from the
 player model, so ported models fall back to CS2's standard arms — which is what
 Valve's own agents do, and is arguably correct.
 
+**Models from other games.** Garry's Mod and other ValveBiped models need a
+re-rig onto CS2's skeleton before this tool can finish them
+([PORTING-OTHER-GAMES.md](PORTING-OTHER-GAMES.md)). Unpacking, decompiling and
+material conversion could be automated around Crowbar and Blender; matching the
+rest pose is the part that takes judgement. Anyone who automates a reliable
+piece of that route is very welcome.
+
 **Sample size.** Every rule here is inferred from three models of one lineage:
 two Valve agents, plus one custom model that was conformed to match them. A
 working AG2 port by an unrelated author would be the single most valuable thing
@@ -39,14 +48,17 @@ Three input paths, all going through the same pipeline after discovery:
 
 | mode | flag | notes |
 |---|---|---|
-| Workshop | `-Pack <id>` | must be subscribed and downloaded |
+| Workshop | `-Pack <id>` | must be subscribed and downloaded; looked for in CS2's own Steam library |
 | loose VPK | `-Vpk <path>` | any `.vpk`; split archives resolve via `_dir` |
 | loose files | `-Source <folder>` | recursive scan for `.vmdl_c` |
+| prepared sources | `-CompileOnly` | `.vmdl` already in the content addon — the Linux handoff, and models re-rigged from other games |
 
 Loose files are placed by reading `m_name` from the compiled model, which holds
-the path the model was originally compiled for. Anything without an
-`m_modelSkeleton` is skipped — that filters viewmodel arms and props without
-needing a name heuristic.
+the path the model was originally compiled for. A model is only treated as a
+player model if its skeleton has a body — `pelvis` plus a leg — which filters
+viewmodel arms and props without a name heuristic. VPKs are listed: models in
+the usual `<name>/<name>.vmdl_c` layout are taken as they are, and any other
+large model file is taken if its skeleton passes the same body test.
 
 If you add a fourth source, the only contract is: produce a `.vmdl` and its
 `.dmx` files under the content addon at the model's intended path, with
@@ -54,12 +66,56 @@ materials alongside. Everything downstream is shared.
 
 ## Testing a change
 
-There is no automated test suite; the only real test is in-game. At minimum:
+Run the test suite first. It needs Python 3 on PATH and nothing else — no CS2,
+no game files:
 
-1. `Port-Model.ps1 -All` on a full pack, no failures
-2. `Verify-Model.ps1 -All` clean
-3. At least one model loaded on a server and observed animating
+```powershell
+powershell -ExecutionPolicy Bypass -File tests\Run-Tests.ps1    # Windows PowerShell 5.1
+```
+
+```bash
+pwsh tests/Run-Tests.ps1                                       # Linux / macOS
+```
+
+It runs the real scripts against synthetic models (`tests\Fixtures.ps1`) and
+small stand-ins for Source2Viewer and `resourcecompiler` (`tests\fakes\`). It
+covers the model edits, a full port of a fake Workshop pack, Verify, Setup and
+Cleanup, and a run under a comma-decimal Windows region. For the common cases
+it checks the edited `.vmdl` is byte-identical to the last release's (ignoring
+the sign of zero: PowerShell 5.1 writes `0.000000` where 7 writes
+`-0.000000`) — if you change those edits on purpose, update the hashes and say
+why in the PR. The
+same suite runs on every push and pull request (GitHub Actions, Windows
+PowerShell 5.1).
+
+The suite proves the scripts do what they say on known input. It cannot prove
+a model animates; that is still only testable in game. Before a release:
+
+1. the test suite passes
+2. `Port-Model.ps1 -All` on a full real pack, no failures
+3. `Verify-Model.ps1 -All` clean
+4. at least one model loaded on a server and observed animating
+
+The suite also runs the Linux port's model edits (`linux/ag2port.py`) on the
+same models and fails unless its `.vmdl` matches Windows'. A change to
+`AG2-All.ps1` needs the same change there.
 
 Syntax-checking PowerShell is not testing. An undefined variable parses fine and
 silently does nothing — that specific mistake cost several hours during
-development.
+development. So did `,` binding tighter than `+` in an array literal:
+`@("$a" + "b", "c")` is not two lines, it is one.
+
+## Releasing
+
+1. Set `$SCRIPT_VERSION` in every script and add a `## vX.Y.Z` section at the
+   top of `CHANGELOG.md`.
+2. Push a tag: `git tag vX.Y.Z` then `git push origin vX.Y.Z`.
+3. The *release* workflow builds `CS2-AG2-Model-Porter-windows.zip` and
+   `CS2-AG2-Model-Porter-linux.zip` and attaches them to a **draft** release,
+   with the CHANGELOG section as its text. It stops if the tag, the scripts and
+   the CHANGELOG disagree.
+4. Download the zips from the draft, check them, then publish.
+
+What goes in each zip is the list in `tools/package_release.py`. A new file
+users need has to be added there. Pull requests build both zips too, so a
+missing file fails before a release.
