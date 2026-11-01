@@ -216,6 +216,10 @@ function Get-Fixtures {
     # root_motion present but empty - the re-parent has to give it a children array
     $f['leaf_root_motion'] = @{ Text = (New-FixtureVmdl -Name 'leaf_root_motion' -AG1 -Roots @((New-Body), (New-Bone 'root_motion' @(0,0,0) @(0,90,90)))) }
 
+    # no root_motion, pelvis under a plain root bone, authored lying along +Y
+    $f['y_up_under_root'] = @{ Text = (New-FixtureVmdl -Name 'y_up_under_root' -AG1 -Roots @(
+        (New-Bone 'root' @(0,0,0) @(0,0,0) @((New-Body 'L' 'R' @(0.4, 42.0, 0.3) @(0, 0, 0)))))) }
+
     # not a player model
     $f['no_pelvis'] = @{ Text = (New-FixtureVmdl -Name 'no_pelvis' -AG1 -Roots @((New-Bone 'root' @(0,0,0) @(0,0,0) @((New-Bone 'prop_part' @(1,0,0)))))) }
     return $f

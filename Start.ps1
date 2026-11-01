@@ -118,6 +118,9 @@ else {
         }
     } while (-not $CS2)
 }
+# a trailing backslash would end up as \" on the command line of every script
+# the menu runs, swallowing the arguments after it
+$CS2 = $CS2.TrimEnd('\', '/')
 $cfg.CS2Path = $CS2
 
 $rc = Join-Path $CS2 "game\bin\win64\resourcecompiler.exe"

@@ -203,13 +203,17 @@ for ($i = $sk; $i -lt $L.Count; $i++) {
 }
 if ($pel -lt 0) { Write-Error "no pelvis bone - is this a player model?"; exit 3 }
 
-# Only a ROOT pelvis has a world-space origin to read the up axis from. Once it
-# sits under root_motion (or anything else) its origin is relative to that
-# parent - an already-converted pelvis reads [0, 42, 0] there, which looks like
-# +Y-up and used to rotate any stray roots adopted below by 90 degrees.
-$topBoneInd = ($L[$sk] -replace '_class.*$', '') + "`t`t"
-$pelIsRoot  = (($L[$pel] -replace 'name.*$', '') -eq $topBoneInd)
-for ($i = $pel; $pelIsRoot -and $i -lt [Math]::Min($pel + 8, $L.Count); $i++) {
+# Once pelvis sits under root_motion it has already been converted into
+# root_motion's space, where an upright model reads [0, 42, 0] - which looks
+# like +Y-up and used to rotate any stray roots adopted below by 90 degrees.
+# Read the up axis only when pelvis is NOT inside root_motion (a root pelvis,
+# or one under some other root bone, as before).
+$pelUnderRm = $false
+if ($rm -ge 0) {
+    $rmBlk = Get-Block $L $rm
+    $pelUnderRm = ($pel -gt $rmBlk[0] -and $pel -lt $rmBlk[1])
+}
+for ($i = $pel; -not $pelUnderRm -and $i -lt [Math]::Min($pel + 8, $L.Count); $i++) {
     $mo = [regex]::Match($L[$i], 'origin = \[ *([-\d.eE]+), *([-\d.eE]+), *([-\d.eE]+) *\]')
     if (-not $mo.Success) { continue }
     $pv = @([double]$mo.Groups[1].Value, [double]$mo.Groups[2].Value, [double]$mo.Groups[3].Value)

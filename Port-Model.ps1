@@ -154,9 +154,12 @@ $CS  = $CS2Path
 # C:\ library failed for everyone with CS2 on another drive, even with -CS2Path.
 # The default library stays as a fallback.
 function Get-WorkshopPackDir([string]$cs2, [string]$id) {
-    $steamapps = Split-Path (Split-Path $cs2.TrimEnd('\', '/') -Parent) -Parent
-    $lib = Join-Path $steamapps "workshop\content\730\$id"
     $def = "C:\Program Files (x86)\Steam\steamapps\workshop\content\730\$id"
+    # a CS2 folder only one level deep (D:\CS2) has no library above it
+    $steamapps = ''
+    try { $steamapps = Split-Path (Split-Path $cs2.TrimEnd('\', '/') -Parent) -Parent } catch {}
+    if (-not $steamapps) { return $def }
+    $lib = Join-Path $steamapps "workshop\content\730\$id"
     if (Test-Path -LiteralPath $lib) { return $lib }
     if (Test-Path -LiteralPath $def) { return $def }
     return $lib
@@ -416,6 +419,39 @@ foreach ($m in $todo) {
             } else {
                 Write-Warning "  no .vmat_c/.vtex_c found under $srcRoot - model will be untextured"
             }
+        } elseif (@($ModelDirs.Values | Where-Object { $_ -eq $ModelDir }).Count -gt 1) {
+            # This model shares its folder with other models in the pack.
+            # Decompiling the folder straight into the addon would also put
+            # fresh, unported copies of THEIR .vmdl and .dmx over any already
+            # ported - harmless to what is compiled, but -CompileOnly or a
+            # Workshop Tools recompile would then build a T-posing model.
+            # Stage it, and leave the other models' sources as they are.
+            $stage = Join-Path ([IO.Path]::GetTempPath()) ("ag2stage-" + [guid]::NewGuid().ToString('N'))
+            try {
+                $null = Invoke-Native $S2V @("-i", $VPK, "-o", $stage, "-f", $filt, "-d")
+                $null = Invoke-Native $S2V @("-i", $VPK, "-o", $stage, "-f", $filt, "-e", "vmat_c")
+                if (Test-Path -LiteralPath $stage) {
+                    $stageFull = (Get-Item -LiteralPath $stage).FullName.TrimEnd('\', '/')
+                    $ownVmdl = Join-Path $stage "$ModelDirWin\$m.vmdl"
+                    $ownDmx = @{}
+                    if (Test-Path -LiteralPath $ownVmdl) {
+                        foreach ($dm in [regex]::Matches((Get-Content -LiteralPath $ownVmdl -Raw -Encoding UTF8), 'filename = "([^"]+\.dmx)"', 'IgnoreCase')) {
+                            $ownDmx[(($dm.Groups[1].Value -replace '\\', '/') -split '/')[-1]] = $true
+                        }
+                    }
+                    $kept = 0
+                    foreach ($sf in @(Get-ChildItem -LiteralPath $stage -Recurse -File)) {
+                        $tgt = Join-Path $OUT $sf.FullName.Substring($stageFull.Length).TrimStart('\', '/')
+                        if (Test-Path -LiteralPath $tgt) {
+                            if ($sf.Extension -eq '.vmdl' -and $sf.Name -ne "$m.vmdl") { $kept++; continue }
+                            if ($sf.Extension -eq '.dmx' -and -not $ownDmx.ContainsKey($sf.Name)) { $kept++; continue }
+                        }
+                        New-Item -ItemType Directory -Force -Path (Split-Path $tgt -Parent) | Out-Null
+                        Copy-Item -LiteralPath $sf.FullName -Destination $tgt -Force
+                    }
+                    if ($kept) { Write-Host "  shares its folder - kept the other models' $kept source file(s) as they were" }
+                }
+            } finally { Remove-Item $stage -Recurse -Force -EA SilentlyContinue }
         } else {
             $null = Invoke-Native $S2V @("-i", $VPK, "-o", $OUT, "-f", $filt, "-d")
             # the compiled materials too: any Source2Viewer cannot decompile are
@@ -437,7 +473,7 @@ foreach ($m in $todo) {
         $refMats = @()
         if (Test-Path $srcModel) {
             $rerl = Invoke-Native $S2V @("-i", $srcModel, "--block", "RERL")
-            $refMats = @([regex]::Matches($rerl, '[a-zA-Z0-9_/\-]+/[a-zA-Z0-9_.\-]+\.vmat(?![a-zA-Z0-9_])') |
+            $refMats = @([regex]::Matches($rerl, '(?<![a-zA-Z0-9_/.\-])(?:[a-zA-Z0-9_.\-]+/)*[a-zA-Z0-9_.\-]+\.vmat(?![a-zA-Z0-9_])') |
                          ForEach-Object { $_.Value } | Sort-Object -Unique)
         }
 
@@ -447,7 +483,7 @@ foreach ($m in $todo) {
         $matDirs = @(if ($Source -and $matDirsFound.Count) { $matDirsFound } else { $MAT })
         if (-not $Source) {
             # material folders outside the model's own folder, pulled from the pack
-            $extern = @($refMats | ForEach-Object { $_ -replace '/[^/]+$', '' } | Sort-Object -Unique |
+            $extern = @($refMats | Where-Object { $_.Contains('/') } | ForEach-Object { $_ -replace '/[^/]+$', '' } | Sort-Object -Unique |
                         Where-Object { $_ -ne $ModelDir -and $_ -notlike "$ModelDir/*" })
             foreach ($e in $extern) {
                 $null = Invoke-Native $S2V @("-i", $VPK, "-o", $OUT, "-f", "$e/", "-d")
@@ -460,7 +496,7 @@ foreach ($m in $todo) {
             }
         }
         # every folder that holds a material this model references
-        foreach ($rm in $refMats) {
+        foreach ($rm in @($refMats | Where-Object { $_.Contains('/') })) {   # never the addon root itself
             $rp = Join-Path $OUT ($rm -replace '/', '\')
             if ((Test-Path -LiteralPath $rp) -or (Test-Path -LiteralPath "$($rp)_c")) { $matDirs += (Split-Path $rp -Parent) }
         }
@@ -551,13 +587,19 @@ foreach ($m in $todo) {
                    Sort-Object FullName -Unique)
         if ($stray.Count) { $stray | Remove-Item -Force; Write-Host "  swept $($stray.Count) stray compiled file(s)" }
 
-        # 2. materials - every folder holding a material or an image, so a
-        # texture kept apart from its material is renamed in step with it
-        $fixDirs = @(@($dirFull) + $matDirs | Sort-Object -Unique | ForEach-Object {
-                       $_; Get-ChildItem $_ -Recurse -Directory -EA SilentlyContinue | ForEach-Object { $_.FullName } })
-        $fixDirs = @($fixDirs | Sort-Object -Unique | Where-Object {
-                       (Test-Path $_) -and @(Get-ChildItem $_ -File -EA SilentlyContinue |
-                                             Where-Object { $_.Extension -in '.vmat', '.png', '.tga' }).Count })
+        # 2. materials - each material folder, plus each folder holding a
+        # texture those materials use, so a texture kept apart from its
+        # material is renamed in step with it
+        $texDirs = @()
+        foreach ($md in $matDirs) {
+            foreach ($vm in @(Get-ChildItem -LiteralPath $md -Filter *.vmat -File -EA SilentlyContinue)) {
+                foreach ($tm in [regex]::Matches((Get-Content -LiteralPath $vm.FullName -Raw), '"([^"]+/[^"/]+\.(?:png|tga|jpg))"')) {
+                    $td = Split-Path (Join-Path $OUT ($tm.Groups[1].Value -replace '/', '\')) -Parent
+                    if (Test-Path -LiteralPath $td) { $texDirs += (Get-Item -LiteralPath $td).FullName }
+                }
+            }
+        }
+        $fixDirs = @(@($matDirs) + $texDirs | Sort-Object -Unique)
         $fm = Join-Path $here "Fix-Materials.ps1"
         if (Test-Path $fm) {
             foreach ($md in $fixDirs) {

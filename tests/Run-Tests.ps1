@@ -59,6 +59,11 @@ function Invoke-Script([string]$name, [string[]]$arguments) {
 # parent of each bone, read from ModelDoc text by brace depth - the way a
 # KV3 parser sees it. (Not indentation: a grafted bone has always been written
 # one tab short of its new siblings, which KV3 ignores.)
+function Test-Ancestor($parents, [string]$bone, [string]$ancestor) {
+    $p = $parents[$bone]
+    for ($n = 0; $p -and $n -lt 50; $n++) { if ($p -ceq $ancestor) { return $true }; $p = $parents[$p] }
+    return $false
+}
 function Get-BoneParents([string]$text) {
     $lines = $text -split "`n"; $parents = @{}; $stack = New-Object System.Collections.ArrayList
     $depth = 0
@@ -150,6 +155,7 @@ $golden = [ordered]@{
     no_root_motion = 'c4443d089252a54a2e94f79f4201d2298a54e8439e0792f14ac756a743aa37aa'
     x_up           = '1ac88a4b2c6e3b9fbc2439452adf935ec1604d1feb14a1b5557877b6f82df0d0'
     unicode        = '82afc705e7962643c2caf4b87b49316aa47cd7c3c2fb5c4258fb6a8cee2235f4'
+    y_up_under_root = '95df4f9b8f4b6e7b6ecf402f9014413f01e8bc81098c745372e49e70a543fde4'
 }
 $fx = Get-Fixtures
 $res = @{}
@@ -172,8 +178,8 @@ Check ($other.Contains([char]0 + 'hand_l' + [char]0)) "lowercase - another model
 Section "AG2-All.ps1 - fixed behaviour"
 foreach ($k in @($fx.Keys | Where-Object { $_ -ne 'no_pelvis' })) {
     $par = Get-BoneParents $res[$k].Text
-    Check ($res[$k].Exit -eq 0 -and $par['pelvis'] -ceq 'root_motion' -and $par['root_motion'] -eq '') `
-          "$k - exit 0, pelvis under root_motion, root_motion the root" $res[$k].Out
+    Check ($res[$k].Exit -eq 0 -and (Test-Ancestor $par 'pelvis' 'root_motion') -and $par['root_motion'] -eq '') `
+          "$k - exit 0, pelvis inside root_motion, root_motion the root" $res[$k].Out
     Check (([regex]::Matches($res[$k].Text, 'name = "wpnPivot"')).Count -eq 1) "$k - exactly one wpnPivot"
     Check (([regex]::Matches($res[$k].Text, '_class = "NmSkeletonList"')).Count -eq 1 -and
            ([regex]::Matches($res[$k].Text, '_class = "AnimGraph2List"')).Count -eq 1) "$k - one of each AG2 list"
@@ -203,6 +209,17 @@ $probe = & {
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 Check ($probe -eq '1,5') "culture really was switched for the run (probe printed '$probe')"
 Check ((Get-GoldenHash (Read-Text $p)) -eq $golden['standard']) "output identical to an English-locale run"
+
+Section "Get-WorkshopPackDir - CS2 folder one level deep (D:\CS2)"
+$ast0 = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'Port-Model.ps1'), [ref]$null, [ref]$null)
+foreach ($fn in $ast0.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) {
+    if ($fn.Name -eq 'Get-WorkshopPackDir') { . ([scriptblock]::Create($fn.Extent.Text)) }
+}
+foreach ($shallow in @('D:\CS2', '/cs2')) {
+    $got = $null; $err = $null
+    try { $got = Get-WorkshopPackDir $shallow '123' } catch { $err = $_ }
+    Check ($null -eq $err -and $got) "no crash for -CS2Path $shallow" "$err"
+}
 
 Section "Rebuild-Vmat - comma-decimal Windows region (de-DE)"
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'Port-Model.ps1'), [ref]$null, [ref]$null)
@@ -254,9 +271,15 @@ $files = [ordered]@{
     "$T/beta/mat/cloth_color_png_22cc33dd.vtex_c" = @{ size = 9000; decompiled = @{ 'cloth_color_png_22cc33dd.png' = 'PNG' } }
     # tidy; one own material, one the pack forgot, one of CS2's
     "$T/gamma/gamma.vmdl_c" = @{ size = 300000; data = (New-ModelData "$T/gamma/gamma.vmdl" $body)
-        rerl = "`t`"$T/gamma/materials/gamma.vmat`"`n`t`"$T/shared/missing.vmat`"`n`t`"materials/default/default.vmat`""
+        rerl = "`t`"$T/gamma/materials/gamma.vmat`"`n`t`"$T/shared/missing.vmat`"`n`t`"materials/default/default.vmat`"`n`t`"toplevel.vmat`""
         decompiled = @{ 'gamma.vmdl' = (New-FixtureVmdl -Name 'gamma' -AG1 -Roots @((New-Body), (New-Bone 'root_motion' @(0,0,0) @(0,90,90) @((New-Bone 'ik_foot_L'))))) } }
-    "$T/gamma/materials/gamma.vmat_c" = @{ size = 2000; data = ($vmatDataPlain -replace '__TEX__', "$T/gamma/materials/g_png_44ee55ff.vtex"); decompiled = @{} }
+    "$T/gamma/materials/gamma.vmat_c" = @{ size = 2000; data = ($vmatDataPlain -replace '__TEX__', "$T/gamma/textures/g_png_44ee55ff.vtex"); decompiled = @{} }
+    "$T/gamma/textures/g_png_44ee55ff.vtex_c" = @{ size = 9000; decompiled = @{ 'g_png_44ee55ff.png' = 'PNG' } }
+    # two models in ONE folder - delta is tidy, delta_alt is not
+    "$T/delta/delta.vmdl_c" = @{ size = 300000; data = (New-ModelData "$T/delta/delta.vmdl" $body); rerl = "`t`"materials/default/default.vmat`""
+        decompiled = @{ 'delta.vmdl' = (New-FixtureVmdl -Name 'delta' -AG1 -Roots @((New-Body), (New-Bone 'root_motion' @(0,0,0) @(0,90,90) @((New-Bone 'ik_foot_L'))))); 'delta_body.dmx' = 'dmx' } }
+    "$T/delta/delta_alt.vmdl_c" = @{ size = 300000; data = (New-ModelData "$T/delta/delta_alt.vmdl" $body); rerl = "`t`"materials/default/default.vmat`""
+        decompiled = @{ 'delta_alt.vmdl' = (New-FixtureVmdl -Name 'delta_alt' -AG1 -Roots @((New-Body), (New-Bone 'root_motion' @(0,0,0) @(0,90,90) @((New-Bone 'ik_foot_L'))))); 'delta_alt_body.dmx' = 'dmx' } }
     # NOT in the tidy layout - zombie.vmdl_c in a folder called zombiertx
     "$T/zombiertx/zombie.vmdl_c" = @{ size = 300000; data = (New-ModelData "$T/zombiertx/zombie.vmdl" $body)
         rerl = "`t`"materials/default/default.vmat`""
@@ -275,13 +298,17 @@ $r = Invoke-Script 'Port-Model.ps1' @('-Pack', '1234567890', '-All', '-CS2Path',
 $o = $r.Out
 Check ($r.Exit -eq 0) "runs to the end (exit 0)" $o
 Check ($o -match 'Source2Viewer-CLI 20\.1\.0') "logs the Source2Viewer version"
-foreach ($mdl in @("alpha/alpha", "beta/beta", "gamma/gamma", "zombiertx/zombie")) {
+foreach ($mdl in @("alpha/alpha", "beta/beta", "gamma/gamma", "zombiertx/zombie", "delta/delta", "delta/delta_alt")) {
     Check (Test-Path (Join-Path $addonGame "$T/$mdl.vmdl_c")) "compiled $mdl.vmdl_c" $o
 }
-Check ($o -match 'also found 1 model\(s\) outside the <name>/<name> layout: zombie') "reports the model outside the tidy layout"
+Check ($o -match 'also found 2 model\(s\) outside the <name>/<name> layout: delta_alt, zombie') "reports the models outside the tidy layout"
 Check (-not (Test-Path (Join-Path $addonGame "$T/props/crate.vmdl_c")) -and ($o -match 'without a body skeleton: crate')) "leaves out a non-body model"
 Check (($o -match 'skipped: 1 file\(s\) with no pelvis bone') -and -not ($o -match 'FAILED: .*alpha_arms')) "arms skipped, not failed"
-Check ($o -match 'ported : 4\s+failed : 0') "summary: 4 ported, 0 failed" $o
+Check ($o -match 'ported : 6\s+failed : 0') "summary: 6 ported, 0 failed" $o
+Check ((Read-Text (Join-Path $addonContent "$T/delta/delta.vmdl")) -match '_class = "AnimGraph2List"') "a model sharing a folder does not revert its neighbour's ported source"
+Check (Test-Path (Join-Path $addonContent "$T/gamma/textures/g.png")) "texture in its own folder renamed"
+Check ((Read-Text (Join-Path $addonContent "$T/gamma/materials/gamma.vmat")) -match 'textures/g\.png') "material points at it"
+Check (Test-Path (Join-Path $addonContent 'toplevel.vmat')) "placeholder for a material referenced without a folder"
 Check (Test-Path (Join-Path $addonContent "$T/beta/mat/cloth.vmat")) "material in mat/ rebuilt (used to fail the model)"
 Check ((Read-Text (Join-Path $addonContent "$T/beta/mat/skin.vmat")) -match 'skin_color\.png') "decompiled material kept, texture name fixed"
 Check (Test-Path (Join-Path $addonContent "$T/beta/mat/skin_color.png")) "texture beside it renamed in step"
@@ -292,7 +319,7 @@ Check ($o -match "uses 1 of CS2's own material") "says CS2's own material is lef
 Check (@(Get-ChildItem $addonContent -Recurse -File -Include *_c).Count -eq 0) "no compiled files left in content/"
 
 $r2 = Invoke-Script 'Port-Model.ps1' @('-Pack', '1234567890', '-All', '-CS2Path', $cs2, '-S2V', $S2VExe)
-Check (([regex]::Matches($r2.Out, 'already compiled - skipping')).Count -eq 4) "second run skips all four" $r2.Out
+Check (([regex]::Matches($r2.Out, 'already compiled - skipping')).Count -eq 6) "second run skips all six" $r2.Out
 
 Section "Verify-Model.ps1"
 $v = Invoke-Script 'Verify-Model.ps1' @('-All', '-CS2Path', $cs2, '-S2V', $S2VExe)
@@ -307,6 +334,12 @@ New-Item -ItemType Directory -Force -Path $caseDir, (Join-Path $cs2 'game/csgo_a
 & (Join-Path $cs2 'game/bin/win64/resourcecompiler.exe') -i (Join-Path $caseDir 'casey.vmdl') | Out-Null
 $vc2 = Invoke-Script 'Verify-Model.ps1' @('-Model', 'casey', '-Addon', 'casetest', '-CS2Path', $cs2, '-S2V', $S2VExe)
 Check ($vc2.Exit -eq 1 -and $vc2.Out -match 'hand_l \(needs hand_L\)') "lowercase hand_l fails, named precisely" $vc2.Out
+
+# an addon with no tidy models, one file whose skeleton cannot be read: FAIL
+$fb = Join-Path $cs2 'game/csgo_addons/verifyfallback/characters/models/x/folder/odd.vmdl_c'
+Write-Json $fb @{ data = '{ m_name = "characters/models/x/folder/odd.vmdl" }'; rerl = ''; pad = ('x' * 120000) }
+$vf = Invoke-Script 'Verify-Model.ps1' @('-All', '-Addon', 'verifyfallback', '-CS2Path', $cs2, '-S2V', $S2VExe)
+Check ($vf.Exit -eq 1 -and $vf.Out -match 'no m_modelSkeleton in DATA') "unreadable skeleton fails rather than being skipped" $vf.Out
 
 Section "Port-Model.ps1 -CompileOnly"
 Remove-Item (Join-Path $addonGame 'characters') -Recurse -Force

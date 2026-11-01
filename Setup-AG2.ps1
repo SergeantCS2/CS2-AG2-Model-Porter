@@ -171,12 +171,12 @@ if ($Vpk) {
     # Large packs are split into <id>_dir.vpk plus <id>_000.vpk, _001.vpk and so
     # on - there is no plain <id>.vpk. Look for any .vpk in the folder.
     # Workshop content lands in the same Steam library as CS2 itself
-    $steamapps = Split-Path (Split-Path $CS.TrimEnd('\', '/') -Parent) -Parent
-    $packDir = Join-Path $steamapps "workshop\content\730\$Pack"
-    if (-not (Test-Path $packDir)) {
-        $defDir = "C:\Program Files (x86)\Steam\steamapps\workshop\content\730\$Pack"
-        if (Test-Path $defDir) { $packDir = $defDir }
-    }
+    # (a CS2 folder only one level deep, like D:\CS2, has no library above it)
+    $steamapps = ''
+    try { $steamapps = Split-Path (Split-Path $CS.TrimEnd('\', '/') -Parent) -Parent } catch {}
+    $defDir  = "C:\Program Files (x86)\Steam\steamapps\workshop\content\730\$Pack"
+    $packDir = if ($steamapps) { Join-Path $steamapps "workshop\content\730\$Pack" } else { $defDir }
+    if (-not (Test-Path $packDir) -and (Test-Path $defDir)) { $packDir = $defDir }
     $packVpk = Get-ChildItem $packDir -Filter *.vpk -EA SilentlyContinue |
                Sort-Object { $_.Name -notlike "*_dir.vpk" } | Select-Object -First 1
     if ($packVpk) {

@@ -57,7 +57,10 @@ parented, and converted with an assumed rather than the actual `root_motion`
 angle; non-ASCII text (bodygroup names in anime packs) was garbled by Windows
 PowerShell; viewmodel arms in a pack were reported as failures rather than
 skipped; a compile that reported no error but wrote no file was counted as a
-success.
+success; in a pack keeping several models in one folder, porting one model
+re-extracted the folder over the others' already-ported sources, so a later
+`-CompileOnly` could build them T-posing; a CS2 path typed into the wizard with
+a trailing `\` garbled the arguments of every script it ran.
 
 **ADDED:** [PORTING-OTHER-GAMES.md](PORTING-OTHER-GAMES.md) — what it takes to
 bring Garry's Mod, SFM, HL2, TF2, CS:GO and other Source games' models to CS2,

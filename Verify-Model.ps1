@@ -93,8 +93,12 @@ $other = @($allC | Where-Object {
     $_.Length -ge 100000
 })
 $compiled = @($tidy + $other)
-# outside the tidy layout, only a file with a body skeleton is a player model
-$untidy = @{}; foreach ($o in $other) { $untidy[$o.FullName] = $true }
+# In a MIXED addon, a file outside the tidy layout whose skeleton has no body
+# is not a player model and is skipped. An addon with no tidy models at all is
+# checked in full, as before - and a file whose skeleton cannot be read is
+# always checked, so it fails rather than slipping through.
+$untidy = @{}
+if ($tidy.Count) { foreach ($o in $other) { $untidy[$o.FullName] = $true } }
 if (-not $compiled) { Write-Error "no compiled player models under $ADDON"; exit 1 }
 
 # Match by exact folder name first, then by the common _player_model suffix.
@@ -125,9 +129,11 @@ foreach ($t in $targets) {
     $data = Invoke-Native $S2V @("-i", $f, "--block", "DATA")
     if ($untidy.ContainsKey($f)) {
         $bn = [regex]::Match($data, 'm_modelSkeleton\s*=\s*\{\s*m_boneName\s*=\s*\[(.*?)\]', 'Singleline')
-        $low = @(if ($bn.Success) { [regex]::Matches($bn.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value.ToLower() } })
-        if (-not (($low -contains 'pelvis') -and (($low -contains 'leg_upper_l') -or ($low -contains 'leg_upper_r')))) {
-            $notBody += $t.BaseName; continue
+        if ($bn.Success) {
+            $low = @([regex]::Matches($bn.Groups[1].Value, '"([^"]+)"') | ForEach-Object { $_.Groups[1].Value.ToLower() })
+            if (-not (($low -contains 'pelvis') -and (($low -contains 'leg_upper_l') -or ($low -contains 'leg_upper_r')))) {
+                $notBody += $t.BaseName; continue
+            }
         }
     }
     $rerl = Invoke-Native $S2V @("-i", $f, "--block", "RERL")
