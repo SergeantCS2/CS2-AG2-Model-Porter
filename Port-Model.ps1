@@ -214,12 +214,19 @@ if (-not $CompileOnly) {
 # For the Linux workflow: models were ported there with --no-compile and the
 # content folder copied across. Nothing to extract or edit, just compile.
 if ($CompileOnly) {
-    # <name>/<name>.vmdl, plus any other .vmdl that has already been ported
-    # (carries an AnimGraph2List) - packs do not all name folders after models
-    $srcs = @(Get-ChildItem $OUT -Recurse -Filter *.vmdl -EA SilentlyContinue |
-              Where-Object { $_.BaseName -eq $_.Directory.Name -or
-                             (Select-String -LiteralPath $_.FullName -Pattern '_class = "AnimGraph2List"' -Quiet) })
-    if (-not $srcs) { Write-Error "no .vmdl sources under $OUT"; exit 1 }
+    # Every .vmdl that has been ported (carries an AnimGraph2List), wherever it
+    # sits - packs do not all name folders after models. An unported source
+    # left in the addon (viewmodel arms extracted alongside a model, say)
+    # would compile into a model that does not animate, so it is listed and
+    # left alone.
+    $allSrc = @(Get-ChildItem $OUT -Recurse -Filter *.vmdl -EA SilentlyContinue)
+    $srcs = @($allSrc | Where-Object { Select-String -LiteralPath $_.FullName -Pattern '_class = "AnimGraph2List"' -Quiet })
+    $notPorted = @($allSrc | Where-Object { $srcs.FullName -notcontains $_.FullName })
+    if ($notPorted.Count) {
+        Write-Host ("skipping $($notPorted.Count) .vmdl not ported yet (no AnimGraph2 lists): " +
+                    (($notPorted | ForEach-Object { $_.BaseName }) -join ', ')) -ForegroundColor DarkGray
+    }
+    if (-not $srcs) { Write-Error "no ported .vmdl sources under $OUT"; exit 1 }
     Write-Host "compiling $($srcs.Count) prepared model(s)`n" -ForegroundColor Cyan
     $outFull = (Resolve-Path -LiteralPath $OUT).ProviderPath.TrimEnd('\', '/')
     $cok = 0; $cbad = @()

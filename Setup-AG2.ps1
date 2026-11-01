@@ -79,7 +79,10 @@ if (Test-Path $GI) {
             if ($lines[$i] -match '"include"\s+"maps"\s*$') { $idx = $i; break }
         }
         if ($idx -lt 0) {
-            Say $false "could not find the VpkDirectories block - add manually, see QUICKSTART"
+            Say $false "could not find the VpkDirectories block in gameinfo.gi"
+            Write-Host "         Add this line by hand, inside VpkDirectories, below `"include`" `"maps`":" -ForegroundColor Yellow
+            Write-Host "             `"include`"       `"characters`"" -ForegroundColor Yellow
+            Write-Host "         (close CS2 first; Cleanup-AG2.ps1 removes it again)" -ForegroundColor DarkYellow
         } else {
             $ind = ($lines[$idx] -replace '"include".*$', '')
             $new = @($lines[0..$idx]) + @("$ind`"include`"       `"characters`"")
