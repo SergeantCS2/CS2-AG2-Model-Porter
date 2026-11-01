@@ -41,6 +41,9 @@ function Get-TextHash([string]$t) {
     $sha = [Security.Cryptography.SHA256]::Create()
     return (($sha.ComputeHash($Utf8.GetBytes($t)) | ForEach-Object { $_.ToString('x2') }) -join '')
 }
+# .NET Framework (Windows PowerShell 5.1) writes negative zero as 0.000000 and
+# .NET (PowerShell 7) as -0.000000 - the same value to KV3. Compare without it.
+function Get-GoldenHash([string]$t) { return (Get-TextHash ($t -replace '(?<![\d.])-(0\.0+)(?!\d)', '$1')) }
 function Write-Json([string]$path, $obj) {
     New-Item -ItemType Directory -Force -Path (Split-Path $path) | Out-Null
     [IO.File]::WriteAllText($path, ($obj | ConvertTo-Json -Depth 12), $Utf8)
@@ -142,11 +145,11 @@ try {
 
 Section "AG2-All.ps1 - output unchanged where it should be"
 $golden = [ordered]@{
-    standard       = 'c6ea1d48430dadb27a14e07ae4c51caf545d4b4add86184373704bf6b31344e0'
-    lowercase      = '06f5c7855c0c1f74b42e230bccfe28903ad076694b9bcc2771685c3113b4f53e'
-    no_root_motion = '5b12bf1805860f02fe39297d10c281984a50f12cdd84727fe2c1158b745922d8'
-    x_up           = '2801cf0a4eca14929ba1058558a366f9c909883f71d4f57dde2c56a2a342420e'
-    unicode        = '4c71233b0212898ec803a81259816fe1ba3acdb777bd24e9014bb30710b72245'
+    standard       = 'b6f9c18a92c03537b5700651fe5d3c7af237be85c9b7252ec0daf920ee8563c9'
+    lowercase      = '850bf75a50f247875adedcf89e669cbd73f73094cf3ee75e60405f5595957a73'
+    no_root_motion = 'c4443d089252a54a2e94f79f4201d2298a54e8439e0792f14ac756a743aa37aa'
+    x_up           = '1ac88a4b2c6e3b9fbc2439452adf935ec1604d1feb14a1b5557877b6f82df0d0'
+    unicode        = '82afc705e7962643c2caf4b87b49316aa47cd7c3c2fb5c4258fb6a8cee2235f4'
 }
 $fx = Get-Fixtures
 $res = @{}
@@ -156,9 +159,9 @@ foreach ($k in $fx.Keys) {
     $res[$k] = @{ Path = $p; Exit = $r.Exit; Out = $r.Out; Text = (Read-Text $p) }
 }
 foreach ($k in $golden.Keys) {
-    $h = Get-TextHash $res[$k].Text
+    $h = Get-GoldenHash $res[$k].Text
     if ($h -ne $golden[$k]) { [IO.File]::WriteAllText((Join-Path $Tmp "$k.actual.vmdl"), $res[$k].Text, $Utf8) }
-    Check ($h -eq $golden[$k]) "$k - identical to v1.2.0 output" $res[$k].Out
+    Check ($h -eq $golden[$k]) "$k - identical to v1.2.0 output" ("hash $h`n" + $res[$k].Out)
 }
 $dmxDir = Split-Path $res['lowercase'].Path
 $own   = [Text.Encoding]::GetEncoding(28591).GetString([IO.File]::ReadAllBytes((Join-Path $dmxDir 'lowercase_body.dmx')))
@@ -199,7 +202,7 @@ $probe = & {
 }
 [Threading.Thread]::CurrentThread.CurrentCulture = [Globalization.CultureInfo]::InvariantCulture
 Check ($probe -eq '1,5') "culture really was switched for the run (probe printed '$probe')"
-Check ((Get-TextHash (Read-Text $p)) -eq $golden['standard']) "output identical to an English-locale run"
+Check ((Get-GoldenHash (Read-Text $p)) -eq $golden['standard']) "output identical to an English-locale run"
 
 Section "Rebuild-Vmat - comma-decimal Windows region (de-DE)"
 $ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $Repo 'Port-Model.ps1'), [ref]$null, [ref]$null)

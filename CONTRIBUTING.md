@@ -81,8 +81,10 @@ It runs the real scripts against synthetic models (`tests\Fixtures.ps1`) and
 small stand-ins for Source2Viewer and `resourcecompiler` (`tests\fakes\`). It
 covers the model edits, a full port of a fake Workshop pack, Verify, Setup and
 Cleanup, and a run under a comma-decimal Windows region. For the common cases
-it checks the edited `.vmdl` is byte-identical to the last release's — if you
-change those edits on purpose, update the hashes and say why in the PR. The
+it checks the edited `.vmdl` is byte-identical to the last release's (ignoring
+the sign of zero: PowerShell 5.1 writes `0.000000` where 7 writes
+`-0.000000`) — if you change those edits on purpose, update the hashes and say
+why in the PR. The
 same suite runs on every push and pull request (GitHub Actions, Windows
 PowerShell 5.1).
 
