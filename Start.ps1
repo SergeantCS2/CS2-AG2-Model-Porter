@@ -1,5 +1,5 @@
 
-$SCRIPT_VERSION = "1.2.0"
+$SCRIPT_VERSION = "1.3.0"
 #requires -Version 5.1
 <#
     CS2-AG2-Model-Porter — interactive launcher
@@ -78,13 +78,25 @@ the workshop pack you want to port.
 Write-Head "1. Locate CS2"
 $candidates = @()
 if ($cfg.CS2Path) { $candidates += $cfg.CS2Path }
-$candidates += "C:\Program Files (x86)\Steam\steamapps\common\Counter-Strike Global Offensive"
-# any other Steam libraries?
-$lib = "C:\Program Files (x86)\Steam\steamapps\libraryfolders.vdf"
-if (Test-Path $lib) {
-    foreach ($m in [regex]::Matches((Get-Content $lib -Raw), '"path"\s+"([^"]+)"')) {
-        $candidates += ($m.Groups[1].Value -replace '\\\\', '\') +
-                       "\steamapps\common\Counter-Strike Global Offensive"
+# Steam itself is not always on C: - ask Windows where it is installed
+$steamRoots = @("C:\Program Files (x86)\Steam")
+foreach ($rk in @('HKCU:\Software\Valve\Steam', 'HKLM:\SOFTWARE\WOW6432Node\Valve\Steam')) {
+    try {
+        $sp = Get-ItemProperty -Path $rk -ErrorAction Stop
+        foreach ($v in @($sp.SteamPath, $sp.InstallPath)) { if ($v) { $steamRoots += ($v -replace '/', '\') } }
+    } catch {}
+}
+foreach ($root in ($steamRoots | Select-Object -Unique)) {
+    $candidates += "$root\steamapps\common\Counter-Strike Global Offensive"
+    # any other Steam libraries?
+    $lib = "$root\steamapps\libraryfolders.vdf"
+    $hasLib = $false
+    try { $hasLib = Test-Path $lib -ErrorAction SilentlyContinue } catch {}
+    if ($hasLib) {
+        foreach ($m in [regex]::Matches((Get-Content $lib -Raw), '"path"\s+"([^"]+)"')) {
+            $candidates += ($m.Groups[1].Value -replace '\\\\', '\') +
+                           "\steamapps\common\Counter-Strike Global Offensive"
+        }
     }
 }
 # a stale libraryfolders.vdf can name a drive that no longer exists, and
@@ -124,6 +136,9 @@ Write-Host @"
   1  A Workshop pack I'm subscribed to        (most common)
   2  A .vpk file on disk                      (delisted pack, backup, manual download)
   3  A folder of loose model files            (.vmdl_c extracted from anywhere)
+
+  These are all CS2 models. Garry's Mod, CS:GO, SFM and other Source 1
+  models (.mdl) need converting first - menu option 9 explains how.
 "@
 $srcMode = Ask "  Choice" $(if ($cfg.SrcMode) { $cfg.SrcMode } else { "1" })
 $cfg.SrcMode = $srcMode
@@ -236,6 +251,7 @@ while ($true) {
    6  Clean up        (remove everything this tool added)
    7  What next?      (publishing and server setup)
    8  About
+   9  Other games     (Garry's Mod, CS:GO, SFM - what works and how)
    Q  Quit
 "@
     switch ((Read-Host "  Choice").ToUpper()) {
@@ -262,6 +278,9 @@ while ($true) {
         "7" {
             Write-Head "Publishing and server setup"
             Write-Host @"
+  VERIFY FIRST
+    Option 5. Don't publish anything that fails - it will not animate.
+
   PUBLISH
     Launch the CS2 Workshop Tools and select addon '$Addon'.
     Asset Browser -> Tools -> Counter-Strike 2 Workshop Manager.
@@ -321,6 +340,34 @@ while ($true) {
   MIT licensed. The scripts are free. The models aren't mine or yours - ask
   before you republish someone else's work.
 "@ -ForegroundColor Gray
+            Read-Host "`n  Enter to continue" | Out-Null
+        }
+        "9" {
+            Write-Head "Models from other games"
+            Write-Host @"
+  WHAT THIS TOOL READS
+    Compiled CS2 models (.vmdl_c) - from a Workshop pack, a .vpk, or loose
+    files. That covers every pre-AnimGraph2 CS2 player model.
+
+  CS:GO PLAYER MODELS (.mdl)
+    Usually rigged on the skeleton CS2 inherited (pelvis, spine_0, hand_L...),
+    so usually no re-rig. Convert the .mdl to a CS2 model with an import tool,
+    then let this tool finish it and Verify will confirm the skeleton - see
+    PORTING-OTHER-GAMES.md.
+
+  GARRY'S MOD / SFM / HL2 / TF2 PLAYERMODELS (.mdl)
+    Rigged on a different skeleton (ValveBiped). CS2's animations only
+    drive CS2's skeleton, so the mesh must be re-rigged onto it in Blender
+    first. That step is manual - nothing can do it reliably from a script -
+    but everything after it is this tool: compile, verify, publish.
+    valvebiped_to_cs2.txt maps every bone name.
+
+  The full walkthrough, with the tools to use at each step:
+      PORTING-OTHER-GAMES.md   (next to this script)
+
+  Same rules as any pack: these are other people's models. Ask before
+  you publish.
+"@
             Read-Host "`n  Enter to continue" | Out-Null
         }
         "Q" { Write-Host "`n  Settings saved to settings.json`n"; exit }
